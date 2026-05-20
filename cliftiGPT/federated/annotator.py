@@ -118,6 +118,7 @@ class FedAnnotator(FedBase, FedAvg):
     def __init__(self, reference_adata, data_dir, output_dir, n_rounds, **kwargs):
         FedBase.__init__(self, data_dir=data_dir, output_dir=output_dir, n_rounds=n_rounds, **kwargs)
         FedAvg.__init__(self, n_rounds=self.fed_config.n_rounds, **kwargs)
+        self.prep_mode = kwargs.get("prep_mode", "federated")
         adata = read_h5ad(data_dir, reference_adata)
         n_total_samples = len(adata)
         self.distribute_adata_by_batch(adata, kwargs['batch_key'])
@@ -153,6 +154,19 @@ class FedAnnotator(FedBase, FedAvg):
             client.adata = client.filter(client.adata)
 
     def preprocess_data(self):
+        if self.prep_mode == "federated":
+            self._preprocess_data_federated()
+        elif self.prep_mode == "centralized":
+            self._preprocess_data_centralized()
+        elif self.prep_mode == "smpc":
+            raise NotImplementedError(
+                "prep_mode='smpc' is reserved for the secure-multiparty variant; "
+                "not implemented yet. Use 'federated' (default) or 'centralized'."
+            )
+        else:
+            raise ValueError(f"Unknown prep_mode: {self.prep_mode!r}")
+
+    def _preprocess_data_federated(self):
         if self.fed_config.preprocess.filter_gene_by_counts:
             self.logger.federated("Federated filtering genes by counts ...")
             local_gene_counts_list = [client.get_local_gene_counts() for client in self.clients]
@@ -185,6 +199,25 @@ class FedAnnotator(FedBase, FedAvg):
             global_bin_edges = aggregate_bin_edges(local_bin_edges_list)
             for client in self.clients:
                 client.binning(global_bin_edges)
+
+    def _preprocess_data_centralized(self):
+        """Per-client scGPT centralized preprocessing.
+
+        fed_config.preprocess.* boolean flags continue to gate which steps run;
+        the numeric settings (target_sum, n_bins, hvg_flavor, ...) come from
+        config.yml via each client's preprocessor instantiation.
+        """
+        fc = self.fed_config.preprocess
+        for client in self.clients:
+            pp = client.preprocessor
+            pp.filter_gene_by_counts = pp.filter_gene_by_counts if fc.filter_gene_by_counts else False
+            pp.filter_cell_by_counts = pp.filter_cell_by_counts if fc.filter_cell_by_counts else False
+            pp.normalize_total       = pp.normalize_total       if fc.normalize_total       else False
+            pp.log1p                 = pp.log1p                 if fc.log1p                 else False
+            pp.subset_hvg            = pp.subset_hvg            if fc.subset_hvg            else False
+            pp.binning               = pp.binning               if fc.binning               else None
+            self.logger.federated(f"scGPT preprocessing for {client.log_id} ...")
+            pp(client.adata, batch_key=None)
 
     def post_prep_setup(self):
         for client in self.clients:

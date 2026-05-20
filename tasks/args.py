@@ -49,6 +49,18 @@ def add_federated_annotation_args(parser):
     parser.add_argument("--use_fedprox", action='store_true', default=False)
     parser.add_argument("--mu", type=float, default=None, help="Mean parameter")
     parser.add_argument("--param_tuning", action='store_true', default=False)
+    parser.add_argument(
+        "--prep_mode",
+        type=str,
+        choices=["centralized", "federated", "smpc"],
+        default="federated",
+        help=(
+            "Preprocessing mode for federated annotation. "
+            "'federated' (default): existing per-client local stats + coordinator aggregation. "
+            "'centralized': each client runs scGPT's Preprocessor.__call__ on its own adata. "
+            "'smpc': reserved for the SMPC variant (not implemented yet)."
+        ),
+    )
 
 def add_federated_embedding_args(parser):
     parser.add_argument('--fed_config_file', type=str, help='.yml file for the federated model',

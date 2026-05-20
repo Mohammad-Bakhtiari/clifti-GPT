@@ -12,6 +12,7 @@ GPU="${6-0}"
 agg_method="${7-fedavg}"
 weighted="${8-false}"
 mu="${9-0}"
+prep_mode="${10-federated}"
 
 resolve_dataset_keys "$datasetnames"
 
@@ -26,7 +27,7 @@ for key in "${keys[@]}"; do
     IFS='|' read -r -a args <<< "${datasets[$key]}"
     echo -e "\e[32mArguments: ${args[0]} ${args[1]} ${args[2]} ${args[3]} ${args[4]} ${args[5]}\e[0m"
     echo -e "\e[32m******************************************\e[0m"
-    ./annotation.sh "${mode}" "${args[0]}" "${args[1]}" "${args[2]}" "${args[3]}" "${args[4]}" "${GPU}" "${n_epochs}" "${n_rounds}" "${agg_method}" "${weighted}" "${smpc}" "${mu}"
+    ./annotation.sh "${mode}" "${args[0]}" "${args[1]}" "${args[2]}" "${args[3]}" "${args[4]}" "${GPU}" "${n_epochs}" "${n_rounds}" "${agg_method}" "${weighted}" "${smpc}" "${mu}" "${prep_mode}"
 
     if [ $? -ne 0 ]; then
         echo -e "\e[31Error processing dataset $key. Please check the configuration.\e[0m"
