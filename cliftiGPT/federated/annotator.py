@@ -1,12 +1,14 @@
 import copy
 import os.path
 import torch
+import crypten
+import numpy as np
 from typing import Dict
 from cliftiGPT.base import FedBase
 from cliftiGPT.centralized.annotator import Training, Inference
 from cliftiGPT.utils import read_h5ad
 from cliftiGPT.preprocessor.local import Preprocessor
-from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_hvg_stats, \
+from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_bin_edges_smpc, aggregate_hvg_stats, \
     aggregate_local_gene_sets, aggregate_local_celltype_sets
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
@@ -90,6 +92,38 @@ class ClientAnnotator(Client, Training):
     def get_local_bin_edges(self):
         return self.preprocessor.compute_local_bin_edges(self.adata)
 
+    def get_local_bin_edges_smpc(self):
+        """Secret-shared local quantile edges and non-zero count for fed-weight-avg-smpc binning."""
+        bin_edges, n = self.preprocessor.compute_local_bin_edges(self.adata)
+        edges = torch.tensor(bin_edges, dtype=torch.float32, device=self.device)
+        n_nonzero = torch.tensor(float(n), dtype=torch.float32, device=self.device)
+        return crypten.cryptensor(edges), crypten.cryptensor(n_nonzero.view(1))
+
+    def get_local_envelope_stats(self):
+        """Secret-shared local max and non-zero count for secure-histogram binning.
+
+        Returns a pair of ``crypten.CrypTensor`` shares (each of shape ``(1,)``)
+        suitable for being consumed by ``secure_reveal_envelope_max`` and the
+        secret-shared ``N`` channel of ``aggregate_secure_histogram_bin_edges``,
+        mirroring ``ClientEmbedder.report_n_local_samples``.
+        """
+        local_max, local_n = self.preprocessor.compute_local_envelope_stats(self.adata)
+        local_max = local_max.view(1).to(self.device)
+        local_n = local_n.view(1).to(self.device)
+        return crypten.cryptensor(local_max), crypten.cryptensor(local_n)
+
+    def get_local_histogram(self, envelope_grid: np.ndarray):
+        """Secret-shared local histogram of non-zero values over the public envelope.
+
+        ``envelope_grid`` is the public ``(M + 1,)`` grid derived from the
+        previously revealed ``max_global``; the returned share has shape
+        ``(M,)`` and is to be summed across clients inside
+        ``aggregate_secure_histogram_bin_edges``.
+        """
+        hist = self.preprocessor.compute_local_histogram(self.adata, envelope_grid)
+        hist = hist.to(self.device)
+        return crypten.cryptensor(hist)
+
     def binning(self, global_bin_edges):
         self.adata = self.preprocessor.apply_binning(self.adata, global_bin_edges)
 
@@ -118,7 +152,7 @@ class FedAnnotator(FedBase, FedAvg):
     def __init__(self, reference_adata, data_dir, output_dir, n_rounds, **kwargs):
         FedBase.__init__(self, data_dir=data_dir, output_dir=output_dir, n_rounds=n_rounds, **kwargs)
         FedAvg.__init__(self, n_rounds=self.fed_config.n_rounds, **kwargs)
-        self.prep_mode = kwargs.get("prep_mode", "federated")
+        self.prep_mode = kwargs.get("prep_mode", "fed-weight-avg")
         adata = read_h5ad(data_dir, reference_adata)
         n_total_samples = len(adata)
         self.distribute_adata_by_batch(adata, kwargs['batch_key'])
@@ -154,15 +188,10 @@ class FedAnnotator(FedBase, FedAvg):
             client.adata = client.filter(client.adata)
 
     def preprocess_data(self):
-        if self.prep_mode == "federated":
-            self._preprocess_data_federated()
-        elif self.prep_mode == "centralized":
+        if self.prep_mode == "centralized":
             self._preprocess_data_centralized()
-        elif self.prep_mode == "smpc":
-            raise NotImplementedError(
-                "prep_mode='smpc' is reserved for the secure-multiparty variant; "
-                "not implemented yet. Use 'federated' (default) or 'centralized'."
-            )
+        elif self.prep_mode in ("fed-weight-avg", "fed-weight-avg-smpc", "fed-hist", "fed-hist-smpc"):
+            self._preprocess_data_federated()
         else:
             raise ValueError(f"Unknown prep_mode: {self.prep_mode!r}")
 
@@ -193,12 +222,46 @@ class FedAnnotator(FedBase, FedAvg):
             global_hvg_stats = aggregate_hvg_stats(local_hvg_stats)
             for client in self.clients:
                 client.apply_hvg_stats(global_hvg_stats)
-        if self.fed_config.preprocess.binning:
-            self.logger.federated("Federated binning ...")
-            local_bin_edges_list = [client.get_local_bin_edges() for client in self.clients]
-            global_bin_edges = aggregate_bin_edges(local_bin_edges_list)
-            for client in self.clients:
-                client.binning(global_bin_edges)
+        self._federated_binning()
+
+    def _federated_binning(self):
+        if not self.fed_config.preprocess.binning:
+            return
+        if self.prep_mode == "fed-weight-avg":
+            self._binning_weighted_avg_plain()
+        elif self.prep_mode == "fed-weight-avg-smpc":
+            self._binning_weighted_avg_smpc()
+        elif self.prep_mode == "fed-hist":
+            raise NotImplementedError(
+                "prep_mode='fed-hist': plaintext histogram binning — "
+                "see §3 in docs/methods/federated_binning.tex"
+            )
+        elif self.prep_mode == "fed-hist-smpc":
+            raise NotImplementedError(
+                "prep_mode='fed-hist-smpc': secure histogram binning — "
+                "see §4 in docs/methods/federated_binning.tex"
+            )
+        else:
+            raise ValueError(f"Unknown prep_mode for federated binning: {self.prep_mode!r}")
+
+    def _binning_weighted_avg_plain(self):
+        self.logger.federated("Federated binning (weighted-average, plaintext) ...")
+        local_bin_edges_list = [client.get_local_bin_edges() for client in self.clients]
+        global_bin_edges = aggregate_bin_edges(local_bin_edges_list)
+        for client in self.clients:
+            client.binning(global_bin_edges)
+
+    def _binning_weighted_avg_smpc(self):
+        self.logger.federated("Federated binning (weighted-average, SMPC) ...")
+        edge_shares = []
+        n_shares = []
+        for client in self.clients:
+            b_share, n_share = client.get_local_bin_edges_smpc()
+            edge_shares.append(b_share)
+            n_shares.append(n_share)
+        global_bin_edges = aggregate_bin_edges_smpc(edge_shares, n_shares)
+        for client in self.clients:
+            client.binning(global_bin_edges)
 
     def _preprocess_data_centralized(self):
         """Per-client scGPT centralized preprocessing.
