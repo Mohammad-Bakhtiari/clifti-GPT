@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from scipy.sparse import issparse
 import scanpy as sc
 from anndata import AnnData
@@ -155,6 +156,69 @@ class Preprocessor(CentralPreprocessor):
         all_non_zero_values = self.layer_data[self.layer_data > 0]
         bin_edges = np.quantile(all_non_zero_values, np.linspace(0, 1, self.binning - 1))
         return bin_edges, len(all_non_zero_values)
+
+    def _materialize_layer_data(self, adata: AnnData) -> np.ndarray:
+        """Cache and return a dense non-negative view of the binning input layer."""
+        self.layer_data = _get_obs_rep(adata, layer=self.key_to_process)
+        self.layer_data = self.layer_data.A if issparse(self.layer_data) else self.layer_data
+        if self.layer_data.min() < 0:
+            raise ValueError(f"Assuming non-negative data, but got min value {self.layer_data.min()}.")
+        return self.layer_data
+
+    def compute_local_envelope_stats(self, adata: AnnData) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Local envelope statistics for the secure-histogram binning path.
+
+        Returns a torch float32 tensor pair ``(local_max, local_n_nonzero)`` ready
+        to be wrapped in ``crypten.cryptensor`` by the client, matching the style
+        of ``ClientEmbedder.report_n_local_samples``.
+        """
+        self.log("Computing local envelope stats ...")
+        layer_data = self._materialize_layer_data(adata)
+        nonzero = layer_data[layer_data > 0]
+        if nonzero.size == 0:
+            local_max = torch.tensor(0.0, dtype=torch.float32)
+        else:
+            local_max = torch.tensor(float(nonzero.max()), dtype=torch.float32)
+        local_n_nonzero = torch.tensor(float(nonzero.size), dtype=torch.float32)
+        return local_max, local_n_nonzero
+
+    def compute_local_histogram(
+        self, adata: AnnData, envelope_grid: np.ndarray
+    ) -> torch.Tensor:
+        """Local non-zero-value histogram over a shared envelope grid.
+
+        Parameters
+        ----------
+        adata : AnnData
+            Local AnnData to histogram.
+        envelope_grid : np.ndarray
+            Monotonically increasing grid of length ``M + 1`` shared across
+            clients, starting at 0 and ending at the globally revealed
+            ``max_global``. The returned histogram has length ``M`` and
+            represents counts of non-zero values falling into each
+            ``(envelope_grid[m], envelope_grid[m + 1]]`` interval, with the
+            last interval inclusive on both ends to absorb the global maximum.
+
+        Returns
+        -------
+        torch.Tensor
+            Length-``M`` float32 count vector ready to be wrapped in
+            ``crypten.cryptensor`` by the client.
+        """
+        self.log("Computing local histogram ...")
+        if getattr(self, "layer_data", None) is None:
+            self._materialize_layer_data(adata)
+        layer_data = self.layer_data
+        nonzero = layer_data[layer_data > 0]
+        if envelope_grid.ndim != 1 or envelope_grid.size < 2:
+            raise ValueError(
+                f"envelope_grid must be a 1D array of length >= 2, "
+                f"got shape {envelope_grid.shape}."
+            )
+        if not np.all(np.diff(envelope_grid) > 0):
+            raise ValueError("envelope_grid must be strictly increasing.")
+        counts, _ = np.histogram(nonzero, bins=envelope_grid)
+        return torch.tensor(counts, dtype=torch.float32)
 
     def apply_binning(self, adata: AnnData, global_bin_edges: np.ndarray) -> AnnData:
         self.log("Applying binning ...")
