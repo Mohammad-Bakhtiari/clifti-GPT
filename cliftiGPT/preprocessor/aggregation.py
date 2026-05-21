@@ -15,6 +15,47 @@ def scale_binning_nonzero_count(n_nonzero: int) -> float:
     return float(n_nonzero) / BINNING_COUNT_SCALE
 
 
+def local_bin_edge_contribution(
+    bin_edges: np.ndarray, n_nonzero: int, total_n_scaled: float
+) -> np.ndarray:
+    """Weighted contribution B_i * (n_i / N) computed on the client (plaintext)."""
+    if total_n_scaled <= 0:
+        raise ValueError("total_n_scaled must be positive.")
+    weight = scale_binning_nonzero_count(n_nonzero) / total_n_scaled
+    return bin_edges * weight
+
+
+def reveal_scaled_nonzero_total(
+    client_n_shares: List["crypten.CrypTensor"],
+) -> float:
+    """SMPC sum of scaled counts; reveal global total sum(n_i / S) only."""
+    if len(client_n_shares) == 0:
+        raise ValueError("client_n_shares must contain at least one entry.")
+    shared_total = client_n_shares[0].clone().view(1)
+    for n_share in client_n_shares[1:]:
+        shared_total = shared_total + n_share.view(1)
+    total = float(shared_total.get_plain_text().item())
+    if total <= 0:
+        raise ValueError("Aggregated scaled non-zero count must be positive.")
+    return total
+
+
+def aggregate_bin_edge_contributions_smpc(
+    client_contribution_shares: List["crypten.CrypTensor"],
+) -> np.ndarray:
+    """Sum secret-shared contribution vectors and finalize bin edges."""
+    if len(client_contribution_shares) == 0:
+        raise ValueError("client_contribution_shares must contain at least one entry.")
+    n_bins = int(client_contribution_shares[0].size()[0])
+    if any(int(c.size()[0]) != n_bins for c in client_contribution_shares):
+        raise ValueError("All contribution shares must have the same length.")
+    shared_sum = client_contribution_shares[0]
+    for contrib in client_contribution_shares[1:]:
+        shared_sum = shared_sum + contrib
+    weighted_bin_edges = shared_sum.get_plain_text().cpu().numpy().astype(np.float32)
+    return _finalize_bin_edges(weighted_bin_edges)
+
+
 def aggregate_gene_counts(filter_gene_by_counts, local_gene_counts_list: List[Dict[str, int]],
                           logger: scg.logger = None) -> np.ndarray:
     all_gene_names = list(local_gene_counts_list[0].keys())
@@ -79,33 +120,24 @@ def aggregate_bin_edges(local_bin_edges_list: List[Tuple[np.ndarray, int]]) -> n
 
 
 def aggregate_bin_edges_smpc(
-    client_bin_edge_shares: List["crypten.CrypTensor"],
     client_n_shares: List["crypten.CrypTensor"],
+    client_contribution_shares: List["crypten.CrypTensor"],
 ) -> np.ndarray:
     """SMPC weighted-average of local bin edges (prep_mode=fed-weight-avg-smpc).
 
-    Each entry of ``client_n_shares`` must already be ``n_i / BINNING_COUNT_SCALE``
-    (see ``scale_binning_nonzero_count``). ``client_bin_edge_shares`` are raw
-    local quantile cuts B_i. The scale cancels in the weighted average.
+    Two-phase protocol (avoids secret B_i * n_i multiply in CrypTen):
+
+    1. ``client_n_shares``: ``cryptensor(n_i / BINNING_COUNT_SCALE)`` per client.
+       The coordinator reveals ``total_n_scaled = sum_i n_i / S`` (global count
+       only; per-client counts stay secret).
+    2. Each client forms ``B_i * (n_i / N)`` locally using its own ``n_i`` and
+       the revealed ``total_n_scaled``, then sends ``client_contribution_shares``.
+    3. This function sums contribution shares and applies ``_finalize_bin_edges``.
     """
-    if len(client_bin_edge_shares) == 0:
-        raise ValueError("client_bin_edge_shares must contain at least one entry.")
-    if len(client_bin_edge_shares) != len(client_n_shares):
-        raise ValueError("client_bin_edge_shares and client_n_shares must have the same length.")
-
-    n_bins = int(client_bin_edge_shares[0].size()[0])
-    if any(int(b.size()[0]) != n_bins for b in client_bin_edge_shares):
-        raise ValueError("All local bin edge shares must have the same length.")
-
-    shared_weighted = client_bin_edge_shares[0] * client_n_shares[0]
-    shared_total = client_n_shares[0].clone().view(1)
-    for b_share, n_share in zip(client_bin_edge_shares[1:], client_n_shares[1:]):
-        shared_weighted = shared_weighted + b_share * n_share
-        shared_total = shared_total + n_share.view(1)
-
-    shared_avg = shared_weighted / shared_total
-    weighted_bin_edges = shared_avg.get_plain_text().cpu().numpy().astype(np.float32)
-    return _finalize_bin_edges(weighted_bin_edges)
+    if len(client_n_shares) != len(client_contribution_shares):
+        raise ValueError("client_n_shares and client_contribution_shares must have the same length.")
+    total_n_scaled = reveal_scaled_nonzero_total(client_n_shares)
+    return aggregate_bin_edge_contributions_smpc(client_contribution_shares)
 
 
 def aggregate_histogram_bin_edges_plain(

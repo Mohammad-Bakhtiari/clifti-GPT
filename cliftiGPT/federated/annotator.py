@@ -8,8 +8,9 @@ from cliftiGPT.base import FedBase
 from cliftiGPT.centralized.annotator import Training, Inference
 from cliftiGPT.utils import read_h5ad
 from cliftiGPT.preprocessor.local import Preprocessor
-from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_bin_edges_smpc, aggregate_hvg_stats, \
-    aggregate_local_gene_sets, aggregate_local_celltype_sets, scale_binning_nonzero_count
+from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_hvg_stats, \
+    aggregate_local_gene_sets, aggregate_local_celltype_sets, scale_binning_nonzero_count, \
+    reveal_scaled_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
 from cliftiGPT.centralized.annotator import Training
@@ -92,14 +93,20 @@ class ClientAnnotator(Client, Training):
     def get_local_bin_edges(self):
         return self.preprocessor.compute_local_bin_edges(self.adata)
 
-    def get_local_bin_edges_smpc(self):
-        """Secret-shared local quantile edges and scaled non-zero count for fed-weight-avg-smpc."""
-        bin_edges, n = self.preprocessor.compute_local_bin_edges(self.adata)
-        edges = torch.tensor(bin_edges, dtype=torch.float32, device=self.device)
+    def get_local_binning_n_share(self):
+        """Secret-shared scaled non-zero count for fed-weight-avg-smpc (phase 1)."""
+        _, n = self.preprocessor.compute_local_bin_edges(self.adata)
         n_scaled = torch.tensor(
             scale_binning_nonzero_count(n), dtype=torch.float32, device=self.device
         )
-        return crypten.cryptensor(edges), crypten.cryptensor(n_scaled.view(1))
+        return crypten.cryptensor(n_scaled.view(1))
+
+    def get_local_binning_contribution_share(self, total_n_scaled: float):
+        """Secret-shared weighted edge contribution B_i * (n_i / N) (phase 2)."""
+        bin_edges, n = self.preprocessor.compute_local_bin_edges(self.adata)
+        contrib = local_bin_edge_contribution(bin_edges, n, total_n_scaled)
+        contrib_t = torch.tensor(contrib, dtype=torch.float32, device=self.device)
+        return crypten.cryptensor(contrib_t)
 
     def get_local_envelope_stats(self):
         """Secret-shared local max and non-zero count for secure-histogram binning.
@@ -255,13 +262,13 @@ class FedAnnotator(FedBase, FedAvg):
 
     def _binning_weighted_avg_smpc(self):
         self.logger.federated("Federated binning (weighted-average, SMPC) ...")
-        edge_shares = []
-        n_shares = []
-        for client in self.clients:
-            b_share, n_share = client.get_local_bin_edges_smpc()
-            edge_shares.append(b_share)
-            n_shares.append(n_share)
-        global_bin_edges = aggregate_bin_edges_smpc(edge_shares, n_shares)
+        n_shares = [client.get_local_binning_n_share() for client in self.clients]
+        total_n_scaled = reveal_scaled_nonzero_total(n_shares)
+        contrib_shares = [
+            client.get_local_binning_contribution_share(total_n_scaled)
+            for client in self.clients
+        ]
+        global_bin_edges = aggregate_bin_edge_contributions_smpc(contrib_shares)
         for client in self.clients:
             client.binning(global_bin_edges)
 
