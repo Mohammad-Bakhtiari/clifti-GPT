@@ -3,9 +3,8 @@
 source ./configs.sh
 
 prep_mode="${1-federated}"
-GPU=0
 datasetname="${2-all}"
-
+GPU="${3-0}"
 
 
 if [[ "$prep_mode" != "federated" && "$prep_mode" != "centralized" && "$prep_mode" != "smpc" ]]; then
