@@ -179,6 +179,7 @@ class Inference(Base):
                                                logger=self.log,
                                                agg_method=agg_method,
                                                mu=mu,
+                                               prep_mode=kwargs.get("prep_mode", "fed-weight-avg"),
                                                )
 
     def read_query(self, query_adata):
