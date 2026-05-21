@@ -29,10 +29,10 @@ def set_seed(seed=None):
         torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True)
 
+    cfg.encoder.precision_bits = 32
     crypten.init()
     cfg.debug.debug_mode = True
     crypten.manual_seed(seed, seed, seed)
-    cfg.encoder.precision_bits = 32
     print(f"✅ Seed set to {seed} (from `set_seed()`)")
 
 import os

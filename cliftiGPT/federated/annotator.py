@@ -9,7 +9,7 @@ from cliftiGPT.centralized.annotator import Training, Inference
 from cliftiGPT.utils import read_h5ad
 from cliftiGPT.preprocessor.local import Preprocessor
 from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_bin_edges_smpc, aggregate_hvg_stats, \
-    aggregate_local_gene_sets, aggregate_local_celltype_sets
+    aggregate_local_gene_sets, aggregate_local_celltype_sets, scale_binning_nonzero_count
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
 from cliftiGPT.centralized.annotator import Training
@@ -93,11 +93,13 @@ class ClientAnnotator(Client, Training):
         return self.preprocessor.compute_local_bin_edges(self.adata)
 
     def get_local_bin_edges_smpc(self):
-        """Secret-shared local quantile edges and non-zero count for fed-weight-avg-smpc binning."""
+        """Secret-shared local quantile edges and scaled non-zero count for fed-weight-avg-smpc."""
         bin_edges, n = self.preprocessor.compute_local_bin_edges(self.adata)
         edges = torch.tensor(bin_edges, dtype=torch.float32, device=self.device)
-        n_nonzero = torch.tensor(float(n), dtype=torch.float32, device=self.device)
-        return crypten.cryptensor(edges), crypten.cryptensor(n_nonzero.view(1))
+        n_scaled = torch.tensor(
+            scale_binning_nonzero_count(n), dtype=torch.float32, device=self.device
+        )
+        return crypten.cryptensor(edges), crypten.cryptensor(n_scaled.view(1))
 
     def get_local_envelope_stats(self):
         """Secret-shared local max and non-zero count for secure-histogram binning.

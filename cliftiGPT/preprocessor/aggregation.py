@@ -5,6 +5,15 @@ from typing import Dict, List, Tuple, Set, Optional
 import scgpt as scg
 from cliftiGPT.utils import secure_quantile_cuts
 
+# Public scale for SMPC binning counts. Keeps (B_i * n_i) products inside
+# CrypTen fixed-point range. Cancels exactly in sum(B_i*n_i/S)/sum(n_i/S).
+BINNING_COUNT_SCALE = 1e6
+
+
+def scale_binning_nonzero_count(n_nonzero: int) -> float:
+    """Return n_nonzero / BINNING_COUNT_SCALE for fed-weight-avg-smpc shares."""
+    return float(n_nonzero) / BINNING_COUNT_SCALE
+
 
 def aggregate_gene_counts(filter_gene_by_counts, local_gene_counts_list: List[Dict[str, int]],
                           logger: scg.logger = None) -> np.ndarray:
@@ -75,7 +84,9 @@ def aggregate_bin_edges_smpc(
 ) -> np.ndarray:
     """SMPC weighted-average of local bin edges (prep_mode=fed-weight-avg-smpc).
 
-    See §2 in docs/methods/federated_binning.tex (Algorithm federated_binning_weighted_smpc).
+    Each entry of ``client_n_shares`` must already be ``n_i / BINNING_COUNT_SCALE``
+    (see ``scale_binning_nonzero_count``). ``client_bin_edge_shares`` are raw
+    local quantile cuts B_i. The scale cancels in the weighted average.
     """
     if len(client_bin_edge_shares) == 0:
         raise ValueError("client_bin_edge_shares must contain at least one entry.")
