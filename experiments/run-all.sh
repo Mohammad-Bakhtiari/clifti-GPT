@@ -96,10 +96,11 @@ echo -e "\e[34mRunning embedding for clients local training\e[0m"
 echo -e "\e[34m-------------------------------------\e[0m"
 ./run_embedding.sh all centralized_clients false $GPU
 
-chmod +x run_best_configs.sh
+chmod +x run_prep_mode_comparison.sh
 echo -e "\e[34m-------------------------------------\e[0m"
 echo -e "\e[34m Running best-config annotation comparison across prep_mode\e[0m"
 echo -e "\e[34m-------------------------------------\e[0m"
-./run_best_configs.sh federated
-./run_best_configs.sh centralized
-./run_best_configs.sh smpc
+./run_prep_mode_comparison.sh fed-weight-avg
+./run_prep_mode_comparison.sh centralized
+./run_prep_mode_comparison.sh fed-weight-avg-smpc
+# fed-hist, fed-hist-smpc: placeholders in FedAnnotator._federated_binning

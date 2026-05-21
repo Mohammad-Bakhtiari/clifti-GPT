@@ -14,7 +14,7 @@ agg_method="${10-fedavg}"
 weighted="${11-true}"
 smpc="${12-flase}"
 mu="${13-0.01}"
-prep_mode="${14-federated}"
+prep_mode="${14-fed-weight-avg}"
 
 if [[ "$agg_method" != "fedavg" && "$agg_method" != "fedprox" ]]; then
     echo "Invalid aggregation method. Use 'fedavg' or 'fedprox'."
@@ -46,7 +46,7 @@ elif [[ "$mode" == *"federated"* ]]; then
   fi
 fi
 
-if [ "$prep_mode" != "federated" ]; then
+if [ "$prep_mode" != "fed-weight-avg" ]; then
     general_mode="${general_mode}-prep-${prep_mode}"
 fi
 

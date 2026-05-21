@@ -12,7 +12,7 @@ GPU="${6-0}"
 agg_method="${7-fedavg}"
 weighted="${8-false}"
 mu="${9-0}"
-prep_mode="${10-federated}"
+prep_mode="${10-fed-weight-avg}"
 
 resolve_dataset_keys "$datasetnames"
 

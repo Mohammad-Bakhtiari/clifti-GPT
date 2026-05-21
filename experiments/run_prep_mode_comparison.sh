@@ -2,13 +2,14 @@
 
 source ./configs.sh
 
-prep_mode="${1-federated}"
+prep_mode="${1-fed-weight-avg}"
 datasetname="${2-all}"
 GPU="${3-0}"
 
 
-if [[ "$prep_mode" != "federated" && "$prep_mode" != "centralized" && "$prep_mode" != "smpc" ]]; then
-    echo "Invalid prep_mode '$prep_mode'. Use 'federated', 'centralized', or 'smpc'."
+valid_prep_modes=" centralized fed-weight-avg fed-weight-avg-smpc fed-hist fed-hist-smpc "
+if [[ "$valid_prep_modes" != *" $prep_mode "* ]]; then
+    echo "Invalid prep_mode '$prep_mode'. Use: centralized, fed-weight-avg, fed-weight-avg-smpc, fed-hist, fed-hist-smpc."
     exit 1
 fi
 
