@@ -796,10 +796,10 @@ def verify_tokenization_consistency(client_tokenized_data_list):
 
 
 class ResultsRecorder:
-    def __init__(self, dataset, file_name='param_tuning', logger=None, verbose=False, agg_method="FedAvg", mu=None):
+    def __init__(self, dataset, file_name='param_tuning', logger=None, verbose=False, agg_method="FedAvg", mu=None, prep_mode="fed-weight-avg"):
         self.results_file = file_name + '.csv'
         self.pickle_file = file_name + '.pkl'
-        self.columns = ['Dataset', 'Round', 'Metric', 'Value', 'n_epochs', 'mu', 'Aggregation']
+        self.columns = ['Dataset', 'Round', 'Metric', 'Value', 'n_epochs', 'mu', 'Aggregation', 'prep_mode']
         self.dataset = dataset
         self.results_df = pd.DataFrame(columns=self.columns)
         self.all_results = {}
@@ -807,6 +807,7 @@ class ResultsRecorder:
         self.verbose = verbose
         self.agg_method = agg_method
         self.mu = mu
+        self.prep_mode = prep_mode
         if dataset not in self.all_results:
             self.all_results[dataset] = {}
         if self.agg_method not in self.all_results[dataset]:
@@ -849,7 +850,8 @@ class ResultsRecorder:
             'n_epochs': n_epochs,
             'Dataset': dataset,
             'mu': mu,
-            'Aggregation': self.agg_method
+            'Aggregation': self.agg_method,
+            'prep_mode': self.prep_mode,
         } for metric, value in metrics.items()])
         self.results_df = pd.concat([self.results_df, new_rows], ignore_index=True)
 
@@ -1271,6 +1273,80 @@ def top_k_ind_selection(dist_matrix, k):
         topk_indices.append(argmin)
         dist_matrix = suppress_argmin(dist_matrix, argmin)
     return topk_indices
+
+
+def secure_quantile_cuts(shared_histogram, shared_total, envelope_grid_tail, probs):
+    """
+    Securely derive quantile cut values from a secret-shared histogram.
+
+    Given an aggregated secret-shared histogram ``H`` of length ``M`` over a
+    public, strictly increasing envelope grid ``g`` of length ``M + 1``, and a
+    vector of public probabilities ``p`` in ``[0, 1]^{n_cuts}``, return secret-
+    shared cut values where the ``j``-th cut is the upper edge ``g[m + 1]`` of
+    the smallest bin ``m`` whose cumulative count ``S[m] = sum_{i<=m} H[i]``
+    reaches ``p[j] * N`` (with ``N`` the secret-shared total). The
+    construction mirrors the iterative one-hot selection style of
+    ``top_k_ind_selection``: each cut is a one-hot dot product against the
+    public envelope, and only the resulting cut values are intended to be
+    revealed by the caller (the legitimate output of the protocol).
+    Probabilities ``p[j] = 0`` are clamped so the corresponding cut falls
+    inside the first non-empty bin rather than at the global lower bound.
+    The cumulative sum is computed as a public-matrix / secret-vector product
+    using a lower-triangular ones matrix, avoiding any dependency on a
+    CrypTen-specific ``cumsum`` implementation.
+
+    Parameters
+    ----------
+    shared_histogram : crypten.CrypTensor
+        Secret-shared non-negative count vector of shape ``(M,)``.
+    shared_total : crypten.CrypTensor
+        Secret-shared scalar total count ``N`` (shape ``(1,)`` or 0-dim).
+    envelope_grid_tail : torch.Tensor or np.ndarray
+        Public envelope upper edges of shape ``(M,)`` (i.e. ``g[1:]``).
+    probs : torch.Tensor or np.ndarray
+        Public probabilities of shape ``(n_cuts,)`` in ``[0, 1]``.
+
+    Returns
+    -------
+    crypten.CrypTensor
+        Secret-shared cut values of shape ``(n_cuts,)``. The caller decides
+        when to reveal these via ``get_plain_text()``.
+    """
+    if not isinstance(envelope_grid_tail, torch.Tensor):
+        envelope_grid_tail = torch.as_tensor(envelope_grid_tail, dtype=torch.float32)
+    else:
+        envelope_grid_tail = envelope_grid_tail.to(dtype=torch.float32)
+
+    if not isinstance(probs, torch.Tensor):
+        probs = torch.as_tensor(probs, dtype=torch.float32)
+    else:
+        probs = probs.to(dtype=torch.float32)
+
+    M = envelope_grid_tail.numel()
+    device = getattr(shared_histogram, "device", torch.device("cpu"))
+    envelope_grid_tail = envelope_grid_tail.to(device=device)
+
+    tri = torch.tril(torch.ones(M, M, dtype=torch.float32, device=device))
+    shared_S = crypten.cryptensor(tri).matmul(shared_histogram)
+
+    one_const = crypten.cryptensor(
+        torch.ones(1, dtype=torch.float32, device=device)
+    )
+    zero_pad = crypten.cryptensor(
+        torch.zeros(1, dtype=torch.float32, device=device)
+    )
+
+    cuts = []
+    for p in probs.tolist():
+        target = shared_total * float(p)
+        target = (target - one_const).relu() + one_const
+        ge_mask = shared_S.ge(target)
+        shifted = crypten.cat([zero_pad, ge_mask[:-1]], dim=0)
+        one_hot = ge_mask * (1 - shifted)
+        cut = one_hot.matmul(envelope_grid_tail)
+        cuts.append(cut.unsqueeze(0))
+
+    return crypten.cat(cuts, dim=0)
 
 
 def get_plain_indices(topk_indices):
