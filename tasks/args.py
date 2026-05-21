@@ -56,13 +56,21 @@ def add_federated_annotation_args(parser):
     parser.add_argument(
         "--prep_mode",
         type=str,
-        choices=["centralized", "federated", "smpc"],
-        default="federated",
+        choices=[
+            "centralized",
+            "fed-weight-avg",
+            "fed-weight-avg-smpc",
+            "fed-hist",
+            "fed-hist-smpc",
+        ],
+        default="fed-weight-avg",
         help=(
             "Preprocessing mode for federated annotation. "
-            "'federated' (default): existing per-client local stats + coordinator aggregation. "
-            "'centralized': each client runs scGPT's Preprocessor.__call__ on its own adata. "
-            "'smpc': reserved for the SMPC variant (not implemented yet)."
+            "'fed-weight-avg' (default): weighted-average bin edges (+ quantile re-spacing), plaintext. "
+            "'fed-weight-avg-smpc': same aggregation, SMPC-protected local edges. "
+            "'fed-hist': histogram-based global quantiles, plaintext (placeholder). "
+            "'fed-hist-smpc': histogram aggregation under SMPC (placeholder). "
+            "'centralized': each client runs scGPT Preprocessor.__call__ on its own adata."
         ),
     )
 
