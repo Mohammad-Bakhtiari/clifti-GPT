@@ -4,7 +4,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -48,26 +48,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def _grouped_bar(
+def _grouped_bar_on_ax(
+    ax: plt.Axes,
     df: pd.DataFrame,
     metric: str,
     ylabel: str,
     title: str,
     subtitle: str,
-    out_path: Path,
-    fmt: str,
     reference_line: Optional[float] = None,
 ) -> None:
     sub = df[df["metric"] == metric].copy()
     if sub.empty:
-        print(f"Skip {out_path.name}: no rows for metric={metric}")
+        ax.set_visible(False)
         return
 
     datasets = list(sub["dataset"].unique())
     x = np.arange(len(datasets))
     width = 0.25
 
-    fig, ax = plt.subplots(figsize=(max(6, 1.8 * len(datasets)), 4.5))
     for i, strategy in enumerate(STRATEGIES):
         vals = []
         for ds in datasets:
@@ -83,16 +81,79 @@ def _grouped_bar(
         )
 
     if reference_line is not None:
-        ax.axhline(reference_line, color="black", linewidth=0.8, linestyle="--", label="no inflation")
+        ax.axhline(
+            reference_line,
+            color="black",
+            linewidth=0.8,
+            linestyle="--",
+            label="no inflation",
+        )
 
     ax.set_xticks(x)
     ax.set_xticklabels(datasets, rotation=20, ha="right")
     ax.set_ylabel(ylabel)
     ax.set_title(f"{title}\n{subtitle}", fontsize=11)
-    ax.legend(loc="best", fontsize=9)
     ax.grid(axis="y", alpha=0.3)
+
+
+def _plot_combined_figure(
+    df: pd.DataFrame,
+    out_paths: List[Path],
+    fmt: str,
+) -> None:
+    cramers_sub = df[df["metric"] == "cramers_v"]
+    amp_sub = df[df["metric"] == "js_amplification"]
+    if cramers_sub.empty and amp_sub.empty:
+        print(f"Skip {out_paths[0].name}: no rows for cramers_v or js_amplification")
+        return
+
+    n_datasets = max(
+        cramers_sub["dataset"].nunique() if not cramers_sub.empty else 0,
+        amp_sub["dataset"].nunique() if not amp_sub.empty else 0,
+    )
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(max(10, 3.2 * n_datasets), 4.5),
+        sharey=False,
+    )
+
+    _grouped_bar_on_ax(
+        axes[0],
+        df,
+        metric="cramers_v",
+        ylabel="Cramér's V",
+        title="Client–bin association after binning",
+        subtitle="Lower is better (weaker batch effect in binned space)",
+    )
+    _grouped_bar_on_ax(
+        axes[1],
+        df,
+        metric="js_amplification",
+        ylabel="JS_binned / JS_raw",
+        title="Heterogeneity amplification by binning",
+        subtitle="Lower is better (binning inflates client separation less)",
+        reference_line=1.0,
+    )
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    amp_handles, amp_labels = axes[1].get_legend_handles_labels()
+    for handle, label in zip(amp_handles, amp_labels):
+        if label not in labels:
+            handles.append(handle)
+            labels.append(label)
+
+    fig.legend(
+        handles,
+        labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        fontsize=9,
+        frameon=True,
+    )
     fig.tight_layout()
-    fig.savefig(out_path.with_suffix(f".{fmt}"), bbox_inches="tight")
+    for out_path in out_paths:
+        fig.savefig(out_path.with_suffix(f".{fmt}"), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -108,25 +169,11 @@ def main() -> None:
     df = pd.read_csv(results_path)
     fmt = args.format
 
-    _grouped_bar(
-        df,
-        metric="cramers_v",
-        ylabel="Cramér's V",
-        title="Client–bin association after binning",
-        subtitle="Lower is better (weaker batch effect in binned space)",
-        out_path=figures_dir / "client_bin_association_cramers_v",
-        fmt=fmt,
-    )
-    _grouped_bar(
-        df,
-        metric="js_amplification",
-        ylabel="JS_binned / JS_raw",
-        title="Heterogeneity amplification by binning",
-        subtitle="Lower is better (binning inflates client separation less)",
-        out_path=figures_dir / "heterogeneity_js_amplification",
-        fmt=fmt,
-        reference_line=1.0,
-    )
+    out_paths = [
+        figures_dir / "client_bin_association_cramers_v",
+        figures_dir / "heterogeneity_js_amplification",
+    ]
+    _plot_combined_figure(df, out_paths, fmt)
 
     print(f"Figures written to {figures_dir} (format={fmt})")
 
