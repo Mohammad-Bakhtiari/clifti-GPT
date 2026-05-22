@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """Multi-dataset federated binning benchmark (no model training).
 
-Evaluates three implemented federated binning strategies against centralized
-ground truth on the five primary annotation benchmark datasets. Writes tidy
-and wide CSV summaries plus optional per-dataset edge arrays.
+Evaluates batch-effect and heterogeneity impact of three federated binning
+strategies on the five primary annotation benchmark datasets:
+
+- Cramér's V (client x bin association; higher = stronger batch effect)
+- JS amplification (JS_binned / JS_raw; higher = binning inflates client separation)
 
 See analysis/plot_binning_benchmark.py for figures.
 """
@@ -74,6 +76,8 @@ METRIC_PREFIX = {
     "fed-hist": "hist",
 }
 
+BATCH_METRICS = ("cramers_v", "js_binned", "js_amplification")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -120,11 +124,6 @@ def _quantile_probs(n_bins: int) -> np.ndarray:
     return np.linspace(0.0, 1.0, n_bins - 1)
 
 
-def _edge_metrics(edges_a: np.ndarray, edges_b: np.ndarray) -> Dict[str, float]:
-    diff = np.abs(edges_a - edges_b)
-    return {"L1": float(diff.mean()), "Linf": float(diff.max())}
-
-
 def _bin_indices(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     return np.digitize(values, edges, right=True)
 
@@ -143,11 +142,22 @@ def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
     return float(0.5 * (kl_pm + kl_qm))
 
 
+def mean_pairwise_js(hist_list: List[np.ndarray]) -> float:
+    """Mean pairwise JS divergence over a list of histogram/count vectors."""
+    if len(hist_list) < 2:
+        return 0.0
+    pairs = []
+    for i in range(len(hist_list)):
+        for j in range(i + 1, len(hist_list)):
+            pairs.append(_js_divergence(hist_list[i], hist_list[j]))
+    return float(np.mean(pairs)) if pairs else 0.0
+
+
 def heterogeneity_index(
     per_client_nonzero: List[np.ndarray],
     n_grid: int = 256,
 ) -> float:
-    """Mean pairwise JS divergence of client value histograms (non-IID proxy)."""
+    """Mean pairwise JS divergence of client value histograms on continuous data."""
     if len(per_client_nonzero) < 2:
         return 0.0
     all_vals = np.concatenate([nz for nz in per_client_nonzero if nz.size > 0])
@@ -161,11 +171,89 @@ def heterogeneity_index(
         else:
             counts, _ = np.histogram(nz, bins=grid)
             hists.append(counts.astype(np.float64))
-    pairs = []
-    for i in range(len(hists)):
-        for j in range(i + 1, len(hists)):
-            pairs.append(_js_divergence(hists[i], hists[j]))
-    return float(np.mean(pairs)) if pairs else 0.0
+    return mean_pairwise_js(hists)
+
+
+def client_bin_histograms(
+    per_client_bins: List[np.ndarray],
+    n_bins: int,
+) -> List[np.ndarray]:
+    """Count vectors over bin indices 1..n_bins-1 for each client."""
+    n_categories = n_bins - 1
+    hists = []
+    for bins in per_client_bins:
+        if bins.size == 0:
+            hists.append(np.zeros(n_categories, dtype=np.float64))
+        else:
+            clipped = np.clip(bins, 1, n_categories)
+            counts = np.bincount(clipped, minlength=n_categories + 1)[1:]
+            hists.append(counts.astype(np.float64))
+    return hists
+
+
+def cramers_v(client_ids: np.ndarray, bin_ids: np.ndarray) -> float:
+    """Cramér's V for client x bin association (0 = independent, 1 = perfect association)."""
+    client_ids = np.asarray(client_ids)
+    bin_ids = np.asarray(bin_ids)
+    if client_ids.size == 0:
+        return 0.0
+
+    client_codes, client_labels = np.unique(client_ids, return_inverse=True)
+    bin_codes, bin_labels = np.unique(bin_ids, return_inverse=True)
+    n_clients = len(client_codes)
+    n_bins_obs = len(bin_codes)
+    if n_clients < 2 or n_bins_obs < 2:
+        return 0.0
+
+    contingency = np.zeros((n_clients, n_bins_obs), dtype=np.float64)
+    np.add.at(contingency, (client_labels, bin_labels), 1.0)
+
+    n = contingency.sum()
+    if n <= 0:
+        return 0.0
+
+    row_sums = contingency.sum(axis=1, keepdims=True)
+    col_sums = contingency.sum(axis=0, keepdims=True)
+    expected = row_sums @ col_sums / n
+    mask = expected > 0
+    chi2 = np.sum(((contingency - expected) ** 2 / expected)[mask])
+
+    k = min(n_clients - 1, n_bins_obs - 1)
+    if k <= 0:
+        return 0.0
+    return float(np.sqrt(chi2 / (n * k)))
+
+
+def strategy_batch_metrics(
+    per_client_bins: List[np.ndarray],
+    client_names: List[str],
+    js_raw: float,
+    n_bins: int,
+) -> Dict[str, float]:
+    """Cramér's V, JS_binned, and JS amplification for one binning strategy."""
+    hists = client_bin_histograms(per_client_bins, n_bins)
+    js_binned = mean_pairwise_js(hists)
+
+    client_id_repeated = []
+    bin_id_repeated = []
+    for client_name, bins in zip(client_names, per_client_bins):
+        if bins.size == 0:
+            continue
+        client_id_repeated.append(np.full(bins.size, client_name))
+        bin_id_repeated.append(bins)
+    if client_id_repeated:
+        all_clients = np.concatenate(client_id_repeated)
+        all_bins = np.concatenate(bin_id_repeated)
+        v = cramers_v(all_clients, all_bins)
+    else:
+        v = 0.0
+
+    js_amplification = js_binned / max(js_raw, 1e-12)
+    return {
+        "cramers_v": v,
+        "js_binned": js_binned,
+        "js_amplification": js_amplification,
+    }
 
 
 def evaluate_dataset(
@@ -208,8 +296,6 @@ def evaluate_dataset(
     if pooled_nonzero.size == 0:
         raise ValueError("All values are zero; cannot derive quantile bins.")
 
-    edges_centralized = np.quantile(pooled_nonzero, probs).astype(np.float32)
-
     local_edges_pairs = []
     per_client_nonzero = []
     client_max_list = []
@@ -221,10 +307,14 @@ def evaluate_dataset(
         per_client_nonzero.append(nz)
         client_max_list.append(float(nz.max()) if nz.size > 0 else 0.0)
         client_n_list.append(int(nz.size))
-        local_edges = np.quantile(nz, probs).astype(np.float32) if nz.size > 0 else np.zeros(len(probs), dtype=np.float32)
+        local_edges = (
+            np.quantile(nz, probs).astype(np.float32)
+            if nz.size > 0
+            else np.zeros(len(probs), dtype=np.float32)
+        )
         local_edges_pairs.append((local_edges, int(nz.size)))
 
-    het_js = heterogeneity_index(per_client_nonzero)
+    js_raw = heterogeneity_index(per_client_nonzero)
 
     edges_weighted = aggregate_bin_edges(local_edges_pairs).astype(np.float32)
 
@@ -251,55 +341,41 @@ def evaluate_dataset(
         client_histograms, client_n_list, value_grid, n_bins
     ).astype(np.float32)
 
-    central_idx = _bin_indices(pooled_nonzero, edges_centralized)
-    weighted_idx = _bin_indices(pooled_nonzero, edges_weighted)
-    weighted_smpc_idx = _bin_indices(pooled_nonzero, edges_weighted_smpc)
-    hist_idx = _bin_indices(pooled_nonzero, edges_hist)
-
-    vs_central = {
-        "fed-weight-avg": _edge_metrics(edges_weighted, edges_centralized),
-        "fed-weight-avg-smpc": _edge_metrics(edges_weighted_smpc, edges_centralized),
-        "fed-hist": _edge_metrics(edges_hist, edges_centralized),
-    }
-    vs_weighted = {
-        "fed-weight-avg-smpc": _edge_metrics(edges_weighted_smpc, edges_weighted),
-        "fed-hist": _edge_metrics(edges_hist, edges_weighted),
+    strategy_edges = {
+        "fed-weight-avg": edges_weighted,
+        "fed-weight-avg-smpc": edges_weighted_smpc,
+        "fed-hist": edges_hist,
     }
 
-    agreement = {
-        "fed-weight-avg": float((weighted_idx == central_idx).mean()),
-        "fed-weight-avg-smpc": float((weighted_smpc_idx == central_idx).mean()),
-        "fed-hist": float((hist_idx == central_idx).mean()),
-    }
+    per_strategy_bins: Dict[str, List[np.ndarray]] = {}
+    for strategy, edges in strategy_edges.items():
+        per_strategy_bins[strategy] = [
+            _bin_indices(nz, edges) for nz in per_client_nonzero
+        ]
 
-    metrics = {
+    metrics: Dict[str, Any] = {
         "n_clients": len(unique_batches),
         "n_cells": int(adata.n_obs),
         "n_nonzero": int(pooled_nonzero.size),
-        "heterogeneity_js": het_js,
+        "js_raw": js_raw,
         "n_bins": n_bins,
         "grid_resolution": grid_resolution,
         "max_expr": float(max_expr),
-        "L1_weighted_vs_centralized": vs_central["fed-weight-avg"]["L1"],
-        "Linf_weighted_vs_centralized": vs_central["fed-weight-avg"]["Linf"],
-        "L1_weighted_smpc_vs_centralized": vs_central["fed-weight-avg-smpc"]["L1"],
-        "Linf_weighted_smpc_vs_centralized": vs_central["fed-weight-avg-smpc"]["Linf"],
-        "L1_hist_vs_centralized": vs_central["fed-hist"]["L1"],
-        "Linf_hist_vs_centralized": vs_central["fed-hist"]["Linf"],
-        "L1_weighted_smpc_vs_weighted": vs_weighted["fed-weight-avg-smpc"]["L1"],
-        "Linf_weighted_smpc_vs_weighted": vs_weighted["fed-weight-avg-smpc"]["Linf"],
-        "L1_hist_vs_weighted": vs_weighted["fed-hist"]["L1"],
-        "Linf_hist_vs_weighted": vs_weighted["fed-hist"]["Linf"],
-        "agreement_weighted_vs_centralized": agreement["fed-weight-avg"],
-        "agreement_weighted_smpc_vs_centralized": agreement["fed-weight-avg-smpc"],
-        "agreement_hist_vs_centralized": agreement["fed-hist"],
-        "nonzero_differing_weighted_smpc_vs_weighted": int((weighted_idx != weighted_smpc_idx).sum()),
-        "nonzero_differing_hist_vs_weighted": int((weighted_idx != hist_idx).sum()),
-        "nonzero_differing_hist_vs_centralized": int((hist_idx != central_idx).sum()),
     }
 
+    for strategy in FEDERATED_STRATEGIES:
+        batch = strategy_batch_metrics(
+            per_strategy_bins[strategy],
+            unique_batches,
+            js_raw,
+            n_bins,
+        )
+        prefix = METRIC_PREFIX[strategy]
+        metrics[f"cramers_v_{prefix}"] = batch["cramers_v"]
+        metrics[f"js_binned_{prefix}"] = batch["js_binned"]
+        metrics[f"js_amplification_{prefix}"] = batch["js_amplification"]
+
     edges = {
-        "centralized": edges_centralized,
         "fed_weight_avg": edges_weighted,
         "fed_weight_avg_smpc": edges_weighted_smpc,
         "fed_hist": edges_hist,
@@ -315,71 +391,18 @@ def _long_rows(dataset: str, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
         "n_clients": metrics["n_clients"],
         "n_cells": metrics["n_cells"],
         "n_nonzero": metrics["n_nonzero"],
-        "heterogeneity_js": metrics["heterogeneity_js"],
+        "js_raw": metrics["js_raw"],
     }
 
     for strategy in FEDERATED_STRATEGIES:
         prefix = METRIC_PREFIX[strategy]
-        rows.append({
-            **base,
-            "strategy": strategy,
-            "reference": "centralized",
-            "metric": "L1_vs_central",
-            "value": metrics[f"L1_{prefix}_vs_centralized"],
-        })
-        rows.append({
-            **base,
-            "strategy": strategy,
-            "reference": "centralized",
-            "metric": "Linf_vs_central",
-            "value": metrics[f"Linf_{prefix}_vs_centralized"],
-        })
-        rows.append({
-            **base,
-            "strategy": strategy,
-            "reference": "centralized",
-            "metric": "agreement_vs_central",
-            "value": metrics[f"agreement_{prefix}_vs_centralized"],
-        })
-
-    for strategy in ("fed-weight-avg-smpc", "fed-hist"):
-        prefix = METRIC_PREFIX[strategy]
-        rows.append({
-            **base,
-            "strategy": strategy,
-            "reference": "fed-weight-avg",
-            "metric": "L1_vs_weighted",
-            "value": metrics[f"L1_{prefix}_vs_weighted"],
-        })
-        rows.append({
-            **base,
-            "strategy": strategy,
-            "reference": "fed-weight-avg",
-            "metric": "Linf_vs_weighted",
-            "value": metrics[f"Linf_{prefix}_vs_weighted"],
-        })
-
-    rows.append({
-        **base,
-        "strategy": "fed-weight-avg-smpc",
-        "reference": "fed-weight-avg",
-        "metric": "nonzero_differing",
-        "value": metrics["nonzero_differing_weighted_smpc_vs_weighted"],
-    })
-    rows.append({
-        **base,
-        "strategy": "fed-hist",
-        "reference": "fed-weight-avg",
-        "metric": "nonzero_differing",
-        "value": metrics["nonzero_differing_hist_vs_weighted"],
-    })
-    rows.append({
-        **base,
-        "strategy": "fed-hist",
-        "reference": "centralized",
-        "metric": "nonzero_differing",
-        "value": metrics["nonzero_differing_hist_vs_centralized"],
-    })
+        for metric_name in BATCH_METRICS:
+            rows.append({
+                **base,
+                "strategy": strategy,
+                "metric": metric_name,
+                "value": metrics[f"{metric_name}_{prefix}"],
+            })
     return rows
 
 
@@ -391,52 +414,36 @@ def _write_summary_md(
         path.write_text("# Binning benchmark\n\nNo datasets evaluated.\n")
         return
 
-    metric_cols = [
-        ("Linf_weighted_vs_centralized", "fed-weight-avg"),
-        ("Linf_weighted_smpc_vs_centralized", "fed-weight-avg-smpc"),
-        ("Linf_hist_vs_centralized", "fed-hist"),
-        ("agreement_weighted_vs_centralized", "fed-weight-avg"),
-        ("agreement_weighted_smpc_vs_centralized", "fed-weight-avg-smpc"),
-        ("agreement_hist_vs_centralized", "fed-hist"),
-    ]
-
-    lines = [
-        "# Binning benchmark summary\n",
-        "Mean metrics across evaluated datasets.\n\n",
-        "| Metric | fed-weight-avg | fed-weight-avg-smpc | fed-hist |\n",
-        "|---|---|---|---|\n",
-    ]
-
-    groups = {
-        "fed-weight-avg": [],
-        "fed-weight-avg-smpc": [],
-        "fed-hist": [],
-    }
-    for col, strat in metric_cols:
-        groups[strat].append(col)
-
     def _mean(col: str) -> float:
         return float(np.mean([r[col] for r in wide_rows]))
 
-    for label, cols in [
-        ("L_inf vs centralized", [c for c, _ in metric_cols[:3]]),
-        ("Agreement vs centralized", [c for c, _ in metric_cols[3:]]),
+    lines = [
+        "# Binning benchmark summary\n",
+        "Batch-effect metrics (lower is better). JS_raw is pre-binning client heterogeneity.\n\n",
+        "| Metric | fed-weight-avg | fed-weight-avg-smpc | fed-hist |\n",
+        "|---|---|---|---|\n",
+    ]
+    for label, metric_key in [
+        ("Cramér's V (client x bin)", "cramers_v"),
+        ("JS amplification (binned/raw)", "js_amplification"),
     ]:
-        vals = [_mean(c) for c in cols]
+        vals = [_mean(f"{metric_key}_{METRIC_PREFIX[s]}") for s in FEDERATED_STRATEGIES]
         lines.append(
             f"| {label} | {vals[0]:.6g} | {vals[1]:.6g} | {vals[2]:.6g} |\n"
         )
 
     lines.append("\n## Per dataset\n\n")
-    lines.append("| Dataset | Het. JS | Linf weighted | Linf hist | Agree weighted | Agree hist |\n")
+    lines.append(
+        "| Dataset | JS_raw | Cramér V weighted | Cramér V hist | JS amp weighted | JS amp hist |\n"
+    )
     lines.append("|---|---|---|---|---|---|\n")
     for row in wide_rows:
         lines.append(
-            f"| {row['dataset']} | {row['heterogeneity_js']:.4g} "
-            f"| {row['Linf_weighted_vs_centralized']:.6g} "
-            f"| {row['Linf_hist_vs_centralized']:.6g} "
-            f"| {row['agreement_weighted_vs_centralized']:.6g} "
-            f"| {row['agreement_hist_vs_centralized']:.6g} |\n"
+            f"| {row['dataset']} | {row['js_raw']:.4g} "
+            f"| {row['cramers_v_weighted']:.6g} "
+            f"| {row['cramers_v_hist']:.6g} "
+            f"| {row['js_amplification_weighted']:.6g} "
+            f"| {row['js_amplification_hist']:.6g} |\n"
         )
     path.write_text("".join(lines))
 
@@ -495,28 +502,25 @@ def main() -> None:
         ds_out.mkdir(parents=True, exist_ok=True)
         np.savez(ds_out / "edges.npz", **edges)
         print(
-            f"OK: {metrics['n_clients']} clients, "
-            f"Linf hist vs central = {metrics['Linf_hist_vs_centralized']:.6g}"
+            f"OK: {metrics['n_clients']} clients, js_raw={metrics['js_raw']:.4g}, "
+            f"Cramér V weighted={metrics['cramers_v_weighted']:.6g}, "
+            f"hist={metrics['cramers_v_hist']:.6g}, "
+            f"JS amp weighted={metrics['js_amplification_weighted']:.6g}, "
+            f"hist={metrics['js_amplification_hist']:.6g}"
         )
 
     long_fields = [
-        "dataset", "n_clients", "n_cells", "n_nonzero", "heterogeneity_js",
-        "strategy", "reference", "metric", "value",
+        "dataset", "n_clients", "n_cells", "n_nonzero", "js_raw",
+        "strategy", "metric", "value",
     ]
     wide_fields = [
-        "dataset", "n_clients", "n_cells", "n_nonzero", "heterogeneity_js",
+        "dataset", "n_clients", "n_cells", "n_nonzero", "js_raw",
         "n_bins", "grid_resolution", "max_expr",
-        "L1_weighted_vs_centralized", "Linf_weighted_vs_centralized",
-        "L1_weighted_smpc_vs_centralized", "Linf_weighted_smpc_vs_centralized",
-        "L1_hist_vs_centralized", "Linf_hist_vs_centralized",
-        "L1_weighted_smpc_vs_weighted", "Linf_weighted_smpc_vs_weighted",
-        "L1_hist_vs_weighted", "Linf_hist_vs_weighted",
-        "agreement_weighted_vs_centralized", "agreement_weighted_smpc_vs_centralized",
-        "agreement_hist_vs_centralized",
-        "nonzero_differing_weighted_smpc_vs_weighted",
-        "nonzero_differing_hist_vs_weighted",
-        "nonzero_differing_hist_vs_centralized",
     ]
+    for strategy in FEDERATED_STRATEGIES:
+        prefix = METRIC_PREFIX[strategy]
+        for metric_name in BATCH_METRICS:
+            wide_fields.append(f"{metric_name}_{prefix}")
 
     results_csv = output_dir / "results.csv"
     with results_csv.open("w", newline="") as f:
