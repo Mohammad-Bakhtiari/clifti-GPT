@@ -157,24 +157,15 @@ class Preprocessor(CentralPreprocessor):
         bin_edges = np.quantile(all_non_zero_values, np.linspace(0, 1, self.binning - 1))
         return bin_edges, len(all_non_zero_values)
 
-    def _materialize_layer_data(self, adata: AnnData) -> np.ndarray:
-        """Cache and return a dense non-negative view of the binning input layer."""
+    def compute_local_stats(self, adata: AnnData) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Local statistics: max expression and non-zero count
+        """
+        self.log("Computing local envelope stats ...")
         self.layer_data = _get_obs_rep(adata, layer=self.key_to_process)
         self.layer_data = self.layer_data.A if issparse(self.layer_data) else self.layer_data
         if self.layer_data.min() < 0:
             raise ValueError(f"Assuming non-negative data, but got min value {self.layer_data.min()}.")
-        return self.layer_data
-
-    def compute_local_envelope_stats(self, adata: AnnData) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Local envelope statistics for the secure-histogram binning path.
-
-        Returns a torch float32 tensor pair ``(local_max, local_n_nonzero)`` ready
-        to be wrapped in ``crypten.cryptensor`` by the client, matching the style
-        of ``ClientEmbedder.report_n_local_samples``.
-        """
-        self.log("Computing local envelope stats ...")
-        layer_data = self._materialize_layer_data(adata)
-        nonzero = layer_data[layer_data > 0]
+        nonzero = self.layer_data[self.layer_data > 0]
         if nonzero.size == 0:
             local_max = torch.tensor(0.0, dtype=torch.float32)
         else:
@@ -207,9 +198,11 @@ class Preprocessor(CentralPreprocessor):
         """
         self.log("Computing local histogram ...")
         if getattr(self, "layer_data", None) is None:
-            self._materialize_layer_data(adata)
-        layer_data = self.layer_data
-        nonzero = layer_data[layer_data > 0]
+            self.layer_data = _get_obs_rep(adata, layer=self.key_to_process)
+            self.layer_data = self.layer_data.A if issparse(self.layer_data) else self.layer_data
+            if self.layer_data.min() < 0:
+                raise ValueError(f"Assuming non-negative data, but got min value {self.layer_data.min()}.")
+        nonzero = self.layer_data[self.layer_data > 0]
         if envelope_grid.ndim != 1 or envelope_grid.size < 2:
             raise ValueError(
                 f"envelope_grid must be a 1D array of length >= 2, "

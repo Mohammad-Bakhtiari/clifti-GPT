@@ -10,7 +10,8 @@ from cliftiGPT.utils import read_h5ad
 from cliftiGPT.preprocessor.local import Preprocessor
 from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_hvg_stats, \
     aggregate_local_gene_sets, aggregate_local_celltype_sets, \
-    reveal_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution
+    reveal_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution, \
+    aggregate_global_max_expr, aggregate_histogram_bin_edges_plain
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
 from cliftiGPT.centralized.annotator import Training
@@ -114,7 +115,7 @@ class ClientAnnotator(Client, Training):
         secret-shared ``N`` channel of ``aggregate_secure_histogram_bin_edges``,
         mirroring ``ClientEmbedder.report_n_local_samples``.
         """
-        local_max, local_n = self.preprocessor.compute_local_envelope_stats(self.adata)
+        local_max, local_n = self.preprocessor.compute_local_stats(self.adata)
         local_max = local_max.view(1).to(self.device)
         local_n = local_n.view(1).to(self.device)
         return crypten.cryptensor(local_max), crypten.cryptensor(local_n)
@@ -160,6 +161,7 @@ class FedAnnotator(FedBase, FedAvg):
         FedBase.__init__(self, data_dir=data_dir, output_dir=output_dir, n_rounds=n_rounds, **kwargs)
         FedAvg.__init__(self, n_rounds=self.fed_config.n_rounds, **kwargs)
         self.prep_mode = kwargs.get("prep_mode", "fed-weight-avg")
+        self.hist_grid_resolution = int(kwargs.get("hist_grid_resolution", 4096))
         adata = read_h5ad(data_dir, reference_adata)
         n_total_samples = len(adata)
         self.distribute_adata_by_batch(adata, kwargs['batch_key'])
@@ -239,10 +241,7 @@ class FedAnnotator(FedBase, FedAvg):
         elif self.prep_mode == "fed-weight-avg-smpc":
             self._binning_weighted_avg_smpc()
         elif self.prep_mode == "fed-hist":
-            raise NotImplementedError(
-                "prep_mode='fed-hist': plaintext histogram binning — "
-                "see §3 in docs/methods/federated_binning.tex"
-            )
+            self._binning_histogram_plain()
         elif self.prep_mode == "fed-hist-smpc":
             raise NotImplementedError(
                 "prep_mode='fed-hist-smpc': secure histogram binning — "
@@ -267,6 +266,33 @@ class FedAnnotator(FedBase, FedAvg):
             for client in self.clients
         ]
         global_bin_edges = aggregate_bin_edge_contributions_smpc(contrib_shares)
+        for client in self.clients:
+            client.binning(global_bin_edges)
+
+    def _binning_histogram_plain(self):
+        self.logger.federated("Federated binning (histogram, plaintext) ...")
+        n_bins = self.clients[0].preprocessor.binning
+
+        client_max_list = []
+        client_n_list = []
+        for client in self.clients:
+            local_max, local_n = client.preprocessor.compute_local_stats(client.adata)
+            client_max_list.append(float(local_max.item()))
+            client_n_list.append(int(local_n.item()))
+
+        max_expr = aggregate_global_max_expr(client_max_list)
+        value_grid = np.linspace(
+            0.0, max_expr, self.hist_grid_resolution + 1, dtype=np.float32
+        )
+
+        client_histograms = []
+        for client in self.clients:
+            hist = client.preprocessor.compute_local_histogram(client.adata, value_grid)
+            client_histograms.append(hist.cpu().numpy())
+
+        global_bin_edges = aggregate_histogram_bin_edges_plain(
+            client_histograms, client_n_list, value_grid, n_bins
+        )
         for client in self.clients:
             client.binning(global_bin_edges)
 

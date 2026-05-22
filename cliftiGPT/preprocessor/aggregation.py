@@ -129,20 +129,96 @@ def aggregate_bin_edges_smpc(
     return aggregate_bin_edge_contributions_smpc(client_contribution_shares)
 
 
+def _quantile_cuts_plain(
+    histogram: np.ndarray,
+    total_n: float,
+    grid_upper_edges: np.ndarray,
+    probs: np.ndarray,
+) -> np.ndarray:
+    """Read quantile cuts from a pooled histogram CDF (plaintext fed-hist)."""
+    H = np.asarray(histogram, dtype=np.float64)
+    grid_upper_edges = np.asarray(grid_upper_edges, dtype=np.float32)
+    probs = np.asarray(probs, dtype=np.float64)
+    if H.ndim != 1 or H.size == 0:
+        raise ValueError(f"histogram must be a non-empty 1D array, got shape {H.shape}.")
+    if grid_upper_edges.ndim != 1 or grid_upper_edges.size != H.size:
+        raise ValueError(
+            f"grid_upper_edges must have length {H.size}, got {grid_upper_edges.shape}."
+        )
+    if total_n <= 0:
+        raise ValueError("total_n must be positive.")
+    cdf = np.cumsum(H)
+    cuts = np.empty(probs.size, dtype=np.float32)
+    for j, p in enumerate(probs):
+        target = max(float(p) * total_n, 1.0)
+        idx = int(np.searchsorted(cdf, target, side="left"))
+        if idx >= H.size:
+            idx = H.size - 1
+        cuts[j] = grid_upper_edges[idx]
+    return cuts
+
+
+def aggregate_global_max_expr(
+    client_max_list: List[float],
+    min_max_expr: float = 1e-6,
+) -> float:
+    """Plaintext global max expression across clients (fed-hist Round 1)."""
+    if len(client_max_list) == 0:
+        raise ValueError("client_max_list must contain at least one entry.")
+    max_val = float(max(client_max_list))
+    return float(max(max_val, min_max_expr))
+
+
 def aggregate_histogram_bin_edges_plain(
     client_histograms: List[np.ndarray],
     client_n_list: List[int],
-    envelope_grid: np.ndarray,
+    value_grid: np.ndarray,
     n_bins: int,
 ) -> np.ndarray:
     """Plaintext histogram-based global bin edges (prep_mode=fed-hist).
 
     See §3 in docs/methods/federated_binning.tex (Algorithm federated_binning_histogram_plain).
     """
-    raise NotImplementedError(
-        "aggregate_histogram_bin_edges_plain is not implemented yet; see "
-        "docs/methods/federated_binning.tex §3 (prep_mode=fed-hist)."
-    )
+    if len(client_histograms) != len(client_n_list):
+        raise ValueError(
+            "client_histograms and client_n_list must have the same length."
+        )
+    if len(client_histograms) == 0:
+        raise ValueError("At least one client must contribute to aggregation.")
+    if n_bins < 2:
+        raise ValueError(f"n_bins must be >= 2, got {n_bins}.")
+
+    value_grid = np.asarray(value_grid, dtype=np.float32)
+    if value_grid.ndim != 1 or value_grid.size < 2:
+        raise ValueError(
+            f"value_grid must be a 1D array of length >= 2, got shape {value_grid.shape}."
+        )
+    if not np.all(np.diff(value_grid) > 0):
+        raise ValueError("value_grid must be strictly increasing.")
+
+    M = value_grid.size - 1
+    hist = np.zeros(M, dtype=np.float64)
+    for client_hist in client_histograms:
+        client_hist = np.asarray(client_hist, dtype=np.float64)
+        if client_hist.shape != (M,):
+            raise ValueError(
+                f"Each client histogram must have shape ({M},), got {client_hist.shape}."
+            )
+        hist += client_hist
+
+    total_n = float(sum(client_n_list))
+    if total_n <= 0:
+        raise ValueError("Aggregated non-zero count must be positive.")
+
+    hist_total = float(hist.sum())
+    if hist_total != total_n:
+        raise ValueError(
+            f"Histogram count sum ({hist_total}) must match aggregated n ({total_n})."
+        )
+
+    grid_upper_edges = value_grid[1:]
+    probs = np.linspace(0.0, 1.0, n_bins - 1)
+    return _quantile_cuts_plain(hist, total_n, grid_upper_edges, probs)
 
 
 def secure_reveal_envelope_max(
