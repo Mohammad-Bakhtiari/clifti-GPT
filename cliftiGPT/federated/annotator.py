@@ -9,8 +9,8 @@ from cliftiGPT.centralized.annotator import Training, Inference
 from cliftiGPT.utils import read_h5ad
 from cliftiGPT.preprocessor.local import Preprocessor
 from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_hvg_stats, \
-    aggregate_local_gene_sets, aggregate_local_celltype_sets, scale_binning_nonzero_count, \
-    reveal_scaled_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution
+    aggregate_local_gene_sets, aggregate_local_celltype_sets, \
+    reveal_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
 from cliftiGPT.centralized.annotator import Training
@@ -94,17 +94,15 @@ class ClientAnnotator(Client, Training):
         return self.preprocessor.compute_local_bin_edges(self.adata)
 
     def get_local_binning_n_share(self):
-        """Secret-shared scaled non-zero count for fed-weight-avg-smpc (phase 1)."""
+        """Secret-shared non-zero count for fed-weight-avg-smpc (phase 1)."""
         _, n = self.preprocessor.compute_local_bin_edges(self.adata)
-        n_scaled = torch.tensor(
-            scale_binning_nonzero_count(n), dtype=torch.float32, device=self.device
-        )
-        return crypten.cryptensor(n_scaled.view(1))
+        n_t = torch.tensor(float(n), dtype=torch.float32, device=self.device)
+        return crypten.cryptensor(n_t.view(1))
 
-    def get_local_binning_contribution_share(self, total_n_scaled: float):
+    def get_local_binning_contribution_share(self, total_n: float):
         """Secret-shared weighted edge contribution B_i * (n_i / N) (phase 2)."""
         bin_edges, n = self.preprocessor.compute_local_bin_edges(self.adata)
-        contrib = local_bin_edge_contribution(bin_edges, n, total_n_scaled)
+        contrib = local_bin_edge_contribution(bin_edges, n, total_n)
         contrib_t = torch.tensor(contrib, dtype=torch.float32, device=self.device)
         return crypten.cryptensor(contrib_t)
 
@@ -263,9 +261,9 @@ class FedAnnotator(FedBase, FedAvg):
     def _binning_weighted_avg_smpc(self):
         self.logger.federated("Federated binning (weighted-average, SMPC) ...")
         n_shares = [client.get_local_binning_n_share() for client in self.clients]
-        total_n_scaled = reveal_scaled_nonzero_total(n_shares)
+        total_n = reveal_nonzero_total(n_shares)
         contrib_shares = [
-            client.get_local_binning_contribution_share(total_n_scaled)
+            client.get_local_binning_contribution_share(total_n)
             for client in self.clients
         ]
         global_bin_edges = aggregate_bin_edge_contributions_smpc(contrib_shares)

@@ -5,30 +5,20 @@ from typing import Dict, List, Tuple, Set, Optional
 import scgpt as scg
 from cliftiGPT.utils import secure_quantile_cuts
 
-# Public scale for SMPC binning counts. Keeps (B_i * n_i) products inside
-# CrypTen fixed-point range. Cancels exactly in sum(B_i*n_i/S)/sum(n_i/S).
-BINNING_COUNT_SCALE = 1e6
-
-
-def scale_binning_nonzero_count(n_nonzero: int) -> float:
-    """Return n_nonzero / BINNING_COUNT_SCALE for fed-weight-avg-smpc shares."""
-    return float(n_nonzero) / BINNING_COUNT_SCALE
-
 
 def local_bin_edge_contribution(
-    bin_edges: np.ndarray, n_nonzero: int, total_n_scaled: float
+    bin_edges: np.ndarray, n_nonzero: int, total_n: float
 ) -> np.ndarray:
     """Weighted contribution B_i * (n_i / N) computed on the client (plaintext)."""
-    if total_n_scaled <= 0:
-        raise ValueError("total_n_scaled must be positive.")
-    weight = scale_binning_nonzero_count(n_nonzero) / total_n_scaled
-    return bin_edges * weight
+    if total_n <= 0:
+        raise ValueError("total_n must be positive.")
+    return bin_edges * (float(n_nonzero) / total_n)
 
 
-def reveal_scaled_nonzero_total(
+def reveal_nonzero_total(
     client_n_shares: List["crypten.CrypTensor"],
 ) -> float:
-    """SMPC sum of scaled counts; reveal global total sum(n_i / S) only."""
+    """SMPC sum of non-zero counts; reveal global N = sum_i n_i only."""
     if len(client_n_shares) == 0:
         raise ValueError("client_n_shares must contain at least one entry.")
     shared_total = client_n_shares[0].clone().view(1)
@@ -36,7 +26,7 @@ def reveal_scaled_nonzero_total(
         shared_total = shared_total + n_share.view(1)
     total = float(shared_total.get_plain_text().item())
     if total <= 0:
-        raise ValueError("Aggregated scaled non-zero count must be positive.")
+        raise ValueError("Aggregated non-zero count must be positive.")
     return total
 
 
@@ -127,16 +117,15 @@ def aggregate_bin_edges_smpc(
 
     Two-phase protocol (avoids secret B_i * n_i multiply in CrypTen):
 
-    1. ``client_n_shares``: ``cryptensor(n_i / BINNING_COUNT_SCALE)`` per client.
-       The coordinator reveals ``total_n_scaled = sum_i n_i / S`` (global count
-       only; per-client counts stay secret).
-    2. Each client forms ``B_i * (n_i / N)`` locally using its own ``n_i`` and
-       the revealed ``total_n_scaled``, then sends ``client_contribution_shares``.
+    1. ``client_n_shares``: ``cryptensor(n_i)`` per client. The coordinator
+       reveals ``N = sum_i n_i`` (global count only; per-client counts stay secret).
+    2. Each client forms ``B_i * (n_i / N)`` locally, then sends
+       ``client_contribution_shares``.
     3. This function sums contribution shares and applies ``_finalize_bin_edges``.
     """
     if len(client_n_shares) != len(client_contribution_shares):
         raise ValueError("client_n_shares and client_contribution_shares must have the same length.")
-    total_n_scaled = reveal_scaled_nonzero_total(client_n_shares)
+    total_n = reveal_nonzero_total(client_n_shares)
     return aggregate_bin_edge_contributions_smpc(client_contribution_shares)
 
 
