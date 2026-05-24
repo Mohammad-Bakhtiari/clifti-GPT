@@ -103,4 +103,4 @@ echo -e "\e[34m-------------------------------------\e[0m"
 ./run_prep_mode_comparison.sh fed-weight-avg
 ./run_prep_mode_comparison.sh centralized
 ./run_prep_mode_comparison.sh fed-weight-avg-smpc
-# fed-hist, fed-hist-smpc: placeholders in FedAnnotator._federated_binning
+# All four federated binning prep_modes are wired in FedAnnotator._federated_binning

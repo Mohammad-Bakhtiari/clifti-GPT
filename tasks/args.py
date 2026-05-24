@@ -68,8 +68,8 @@ def add_federated_annotation_args(parser):
             "Preprocessing mode for federated annotation. "
             "'fed-weight-avg' (default): weighted-average bin edges (+ quantile re-spacing), plaintext. "
             "'fed-weight-avg-smpc': same aggregation, SMPC-protected local edges. "
-            "'fed-hist': histogram-based global quantiles, plaintext (placeholder). "
-            "'fed-hist-smpc': histogram aggregation under SMPC (placeholder). "
+            "'fed-hist': histogram-based global quantiles, plaintext. "
+            "'fed-hist-smpc': same histogram aggregation under SMPC. "
             "'centralized': each client runs scGPT Preprocessor.__call__ on its own adata."
         ),
     )
