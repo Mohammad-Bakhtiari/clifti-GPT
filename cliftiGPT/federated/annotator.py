@@ -11,7 +11,8 @@ from cliftiGPT.preprocessor.local import Preprocessor
 from cliftiGPT.preprocessor.aggregation import aggregate_gene_counts, aggregate_bin_edges, aggregate_hvg_stats, \
     aggregate_local_gene_sets, aggregate_local_celltype_sets, \
     reveal_nonzero_total, aggregate_bin_edge_contributions_smpc, local_bin_edge_contribution, \
-    aggregate_global_max_expr, aggregate_histogram_bin_edges_plain
+    aggregate_global_max_expr, aggregate_histogram_bin_edges_plain, \
+    secure_reveal_envelope_max, aggregate_secure_histogram_bin_edges
 from cliftiGPT.federated.aggregator import FedAvg
 from cliftiGPT.federated.client import Client
 from cliftiGPT.centralized.annotator import Training
@@ -237,26 +238,24 @@ class FedAnnotator(FedBase, FedAvg):
         if not self.fed_config.preprocess.binning:
             return
         if self.prep_mode == "fed-weight-avg":
-            self._binning_weighted_avg_plain()
+            global_bin_edges = self._binning_weighted_avg_plain()
         elif self.prep_mode == "fed-weight-avg-smpc":
-            self._binning_weighted_avg_smpc()
+            global_bin_edges = self._binning_weighted_avg_smpc()
         elif self.prep_mode == "fed-hist":
-            self._binning_histogram_plain()
+            global_bin_edges = self._binning_histogram_plain()
         elif self.prep_mode == "fed-hist-smpc":
-            raise NotImplementedError(
-                "prep_mode='fed-hist-smpc': secure histogram binning — "
-                "see §4 in docs/methods/federated_binning.tex"
-            )
+            global_bin_edges = self._binning_histogram_smpc()
         else:
             raise ValueError(f"Unknown prep_mode for federated binning: {self.prep_mode!r}")
+        for client in self.clients:
+            client.binning(global_bin_edges)
 
     def _binning_weighted_avg_plain(self):
         self.logger.federated("Federated binning (weighted-average, plaintext) ...")
         local_bin_edges_list = [client.get_local_bin_edges() for client in self.clients]
         global_bin_edges = aggregate_bin_edges(local_bin_edges_list)
-        for client in self.clients:
-            client.binning(global_bin_edges)
-
+        return global_bin_edges
+        
     def _binning_weighted_avg_smpc(self):
         self.logger.federated("Federated binning (weighted-average, SMPC) ...")
         n_shares = [client.get_local_binning_n_share() for client in self.clients]
@@ -266,8 +265,7 @@ class FedAnnotator(FedBase, FedAvg):
             for client in self.clients
         ]
         global_bin_edges = aggregate_bin_edge_contributions_smpc(contrib_shares)
-        for client in self.clients:
-            client.binning(global_bin_edges)
+        return global_bin_edges
 
     def _binning_histogram_plain(self):
         self.logger.federated("Federated binning (histogram, plaintext) ...")
@@ -293,8 +291,31 @@ class FedAnnotator(FedBase, FedAvg):
         global_bin_edges = aggregate_histogram_bin_edges_plain(
             client_histograms, client_n_list, value_grid, n_bins
         )
+        return global_bin_edges
+
+    def _binning_histogram_smpc(self):
+        self.logger.federated("Federated binning (histogram, SMPC) ...")
+        n_bins = self.clients[0].preprocessor.binning
+
+        max_shares = []
+        n_shares = []
         for client in self.clients:
-            client.binning(global_bin_edges)
+            max_share, n_share = client.get_local_envelope_stats()
+            max_shares.append(max_share)
+            n_shares.append(n_share)
+
+        max_expr = secure_reveal_envelope_max(max_shares)
+        value_grid = np.linspace(
+            0.0, max_expr, self.hist_grid_resolution + 1, dtype=np.float32
+        )
+
+        hist_shares = [
+            client.get_local_histogram(value_grid) for client in self.clients
+        ]
+        global_bin_edges = aggregate_secure_histogram_bin_edges(
+            hist_shares, n_shares, value_grid, n_bins
+        )
+        return global_bin_edges
 
     def _preprocess_data_centralized(self):
         """Per-client scGPT centralized preprocessing.
