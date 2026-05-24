@@ -175,27 +175,9 @@ def aggregate_histogram_bin_edges_plain(
     value_grid: np.ndarray,
     n_bins: int,
 ) -> np.ndarray:
-    """Plaintext histogram-based global bin edges (prep_mode=fed-hist).
-
-    See §3 in docs/methods/federated_binning.tex (Algorithm federated_binning_histogram_plain).
-    """
-    if len(client_histograms) != len(client_n_list):
-        raise ValueError(
-            "client_histograms and client_n_list must have the same length."
-        )
-    if len(client_histograms) == 0:
-        raise ValueError("At least one client must contribute to aggregation.")
-    if n_bins < 2:
-        raise ValueError(f"n_bins must be >= 2, got {n_bins}.")
-
-    value_grid = np.asarray(value_grid, dtype=np.float32)
-    if value_grid.ndim != 1 or value_grid.size < 2:
-        raise ValueError(
-            f"value_grid must be a 1D array of length >= 2, got shape {value_grid.shape}."
-        )
-    if not np.all(np.diff(value_grid) > 0):
-        raise ValueError("value_grid must be strictly increasing.")
-
+    """Plaintext histogram-based global bin edges
+    """        
+    value_grid = np.asarray(value_grid, dtype=np.float32)  
     M = value_grid.size - 1
     hist = np.zeros(M, dtype=np.float64)
     for client_hist in client_histograms:
@@ -207,9 +189,6 @@ def aggregate_histogram_bin_edges_plain(
         hist += client_hist
 
     total_n = float(sum(client_n_list))
-    if total_n <= 0:
-        raise ValueError("Aggregated non-zero count must be positive.")
-
     hist_total = float(hist.sum())
     if hist_total != total_n:
         raise ValueError(
@@ -223,7 +202,7 @@ def aggregate_histogram_bin_edges_plain(
 
 def secure_reveal_envelope_max(
     client_max_shares: List["crypten.CrypTensor"],
-    envelope_padding: float = 1.05,
+    envelope_padding: float = 1.0,
     min_envelope: float = 1e-6,
 ) -> float:
     """
@@ -240,9 +219,12 @@ def secure_reveal_envelope_max(
         Per-client secret-shared local maxima (each of shape ``(1,)`` or
         0-dim), as produced by ``ClientAnnotator.get_local_envelope_stats``.
     envelope_padding : float, optional
-        Multiplicative padding applied to the revealed maximum so the
-        envelope grid strictly covers the data, even after fixed-point
-        rounding in SMPC. Defaults to ``1.05``.
+        Multiplicative padding applied to the revealed maximum. Defaults to
+        ``1.0`` (no padding) so the SMPC envelope grid matches the plaintext
+        grid produced by ``aggregate_global_max_expr`` bit-for-bit. Values
+        greater than ``1.0`` are still accepted for advanced use (e.g. to
+        absorb fixed-point rounding margin in adversarial settings) but are
+        no longer the default.
     min_envelope : float, optional
         Lower bound for the returned envelope max to keep the grid valid
         when all clients have only zeros. Defaults to ``1e-6``.
@@ -250,8 +232,8 @@ def secure_reveal_envelope_max(
     Returns
     -------
     float
-        Padded ``max_global`` used as the upper end of the public envelope
-        grid.
+        ``max_global`` used as the upper end of the public envelope grid
+        (optionally padded by ``envelope_padding``).
     """
     if len(client_max_shares) == 0:
         raise ValueError("client_max_shares must contain at least one entry.")
