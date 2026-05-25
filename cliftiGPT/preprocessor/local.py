@@ -176,32 +176,10 @@ class Preprocessor(CentralPreprocessor):
     def compute_local_histogram(
         self, adata: AnnData, envelope_grid: np.ndarray
     ) -> torch.Tensor:
-        """Local non-zero-value histogram over a shared envelope grid.
-
-        Parameters
-        ----------
-        adata : AnnData
-            Local AnnData to histogram.
-        envelope_grid : np.ndarray
-            Monotonically increasing grid of length ``M + 1`` shared across
-            clients, starting at 0 and ending at the globally revealed
-            ``max_global``. The returned histogram has length ``M`` and
-            represents counts of non-zero values falling into each
-            ``(envelope_grid[m], envelope_grid[m + 1]]`` interval, with the
-            last interval inclusive on both ends to absorb the global maximum.
-
-        Returns
-        -------
-        torch.Tensor
-            Length-``M`` float32 count vector ready to be wrapped in
-            ``crypten.cryptensor`` by the client.
+        """Local non-zero-value histogram over a shared grid.
+        
         """
         self.log("Computing local histogram ...")
-        if getattr(self, "layer_data", None) is None:
-            self.layer_data = _get_obs_rep(adata, layer=self.key_to_process)
-            self.layer_data = self.layer_data.A if issparse(self.layer_data) else self.layer_data
-            if self.layer_data.min() < 0:
-                raise ValueError(f"Assuming non-negative data, but got min value {self.layer_data.min()}.")
         nonzero = self.layer_data[self.layer_data > 0]
         if envelope_grid.ndim != 1 or envelope_grid.size < 2:
             raise ValueError(

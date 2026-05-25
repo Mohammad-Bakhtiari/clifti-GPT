@@ -1327,12 +1327,7 @@ def secure_quantile_cuts(shared_histogram, shared_total, envelope_grid_tail, pro
     envelope_grid_tail = envelope_grid_tail.to(device=device)
 
     tri = torch.tril(torch.ones(M, M, dtype=torch.float32, device=device))
-    hist_col = shared_histogram.view(-1, 1)
-    shared_S = crypten.cryptensor(tri).matmul(hist_col).squeeze(-1)
-
-    public_envelope = crypten.cryptensor(
-        envelope_grid_tail.detach().clone().to(device=device, dtype=torch.float32)
-    )
+    shared_S = crypten.cryptensor(tri).matmul(shared_histogram)
 
     one_const = crypten.cryptensor(
         torch.ones(1, dtype=torch.float32, device=device)
@@ -1348,8 +1343,8 @@ def secure_quantile_cuts(shared_histogram, shared_total, envelope_grid_tail, pro
         ge_mask = shared_S.ge(target)
         shifted = crypten.cat([zero_pad, ge_mask[:-1]], dim=0)
         one_hot = ge_mask * (1 - shifted)
-        cut = one_hot.mul(public_envelope).sum()
-        cuts.append(cut.view(1))
+        cut = one_hot.matmul(envelope_grid_tail)
+        cuts.append(cut.unsqueeze(0))
 
     return crypten.cat(cuts, dim=0)
 

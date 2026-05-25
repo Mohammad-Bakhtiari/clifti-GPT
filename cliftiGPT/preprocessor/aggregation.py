@@ -3,7 +3,6 @@ import torch
 import crypten
 from typing import Dict, List, Tuple, Set, Optional
 import scgpt as scg
-from cliftiGPT.utils import secure_quantile_cuts
 
 
 def local_bin_edge_contribution(
@@ -251,14 +250,16 @@ def aggregate_secure_histogram_bin_edges(
     """
     Securely derive global bin edges from per-client secret-shared histograms.
 
-    This is the SMPC-protected replacement for ``aggregate_bin_edges``: rather
-    than averaging per-client quantile edges (which is statistically biased
-    under non-IID client distributions and exposes each client's empirical
-    CDF), it sums secret-shared histograms over a shared public envelope grid
-    and reads ``n_bins - 1`` cut points from the resulting global cumulative
-    distribution. Only the final bin edges are revealed, matching the
-    transferable-inference design where only the final prediction leaves the
-    secure computation.
+    Phase 1 (SMPC): sum secret-shared per-client histograms and non-zero counts.
+    Phase 2 (plaintext): read ``n_bins - 1`` quantile cuts from the aggregated
+    histogram with ``_quantile_cuts_plain``, matching ``fed-hist``. Individual
+    client histograms are not revealed; only the pooled histogram (equivalent
+    to plaintext ``fed-hist`` aggregation) and the final bin edges are used
+    downstream.
+
+    A fully encrypted quantile-cut loop (``secure_quantile_cuts``) is not used
+    here because CrypTen's mixed public/secret reductions are unreliable for
+    this pattern in our environment.
 
     Parameters
     ----------
@@ -305,13 +306,21 @@ def aggregate_secure_histogram_bin_edges(
     if not np.all(np.diff(envelope_grid) > 0):
         raise ValueError("envelope_grid must be strictly increasing.")
 
-    envelope_grid_tail = torch.as_tensor(envelope_grid[1:], dtype=torch.float32)
-    probs = torch.linspace(0.0, 1.0, n_bins - 1)
-
-    shared_cuts = secure_quantile_cuts(
-        shared_H, shared_total, envelope_grid_tail, probs
+    H_agg = (
+        shared_H.get_plain_text().detach().cpu().numpy().astype(np.float64)
     )
-    edges = shared_cuts.get_plain_text().cpu().numpy().astype(np.float32)
+    N_agg = float(shared_total.get_plain_text().detach().cpu().item())
+    hist_total = float(H_agg.sum())
+    if hist_total <= 0:
+        raise ValueError("Aggregated secure histogram is empty.")
+    if abs(hist_total - N_agg) > max(1.0, 1e-6 * N_agg):
+        raise ValueError(
+            f"Aggregated histogram count sum ({hist_total}) "
+            f"does not match aggregated N ({N_agg})."
+        )
+
+    probs = np.linspace(0.0, 1.0, n_bins - 1)
+    edges = _quantile_cuts_plain(H_agg, N_agg, envelope_grid[1:], probs)
     if edges.size != n_bins - 1:
         raise ValueError(
             f"Expected {n_bins - 1} secure histogram bin edges, got {edges.size}."
@@ -319,10 +328,7 @@ def aggregate_secure_histogram_bin_edges(
     if not np.all(np.isfinite(edges)):
         raise ValueError("Secure histogram bin edges contain non-finite values.")
     if not np.any(edges > 0):
-        raise ValueError(
-            "Secure histogram bin edges are degenerate (all zero). "
-            "This usually indicates a CrypTen public/secret arithmetic bug."
-        )
+        raise ValueError("Secure histogram bin edges are degenerate (all zero).")
     return edges
 
 
