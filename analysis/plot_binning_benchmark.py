@@ -24,14 +24,17 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-STRATEGIES = ("fed-weight-avg", "fed-weight-avg-smpc", "fed-hist", "fed-hist-smpc")
+BINNING_STRATEGIES = ("fed-weight-avg", "fed-weight-avg-smpc", "fed-hist", "fed-hist-smpc")
+ACCURACY_STRATEGIES = ("centralized",) + BINNING_STRATEGIES
 STRATEGY_LABELS = {
+    "centralized": "Centralized",
     "fed-weight-avg": "Weighted avg",
     "fed-weight-avg-smpc": "Weighted SMPC",
     "fed-hist": "Histogram",
     "fed-hist-smpc": "Histogram SMPC",
 }
 STRATEGY_COLORS = {
+    "centralized": "#666666",
     "fed-weight-avg": "#4477AA",
     "fed-weight-avg-smpc": "#EE6677",
     "fed-hist": "#228833",
@@ -107,7 +110,14 @@ def _load_best_accuracy(csv_path: Path) -> pd.DataFrame:
         )
 
     df = df[df["Metric"] == "Accuracy"].copy()
-    df = df[df["prep_mode"].isin(STRATEGIES)]
+    df["prep_mode"] = (
+        df["prep_mode"]
+        .astype("string")
+        .str.strip()
+        .replace({"": pd.NA, "<NA>": pd.NA})
+        .fillna("centralized")
+    )
+    df = df[df["prep_mode"].isin(ACCURACY_STRATEGIES)]
     if df.empty:
         return pd.DataFrame(
             columns=["dataset", "prep_mode", "best_accuracy", "best_round"]
@@ -154,7 +164,7 @@ def _grouped_bar_on_ax(
     x = np.arange(len(datasets))
     width = 0.18
 
-    for i, strategy in enumerate(STRATEGIES):
+    for i, strategy in enumerate(BINNING_STRATEGIES):
         vals = []
         for ds in datasets:
             row = sub[(sub["dataset"] == ds) & (sub["strategy"] == strategy)]
@@ -210,9 +220,11 @@ def _accuracy_bar_on_ax(
         return
 
     x = np.arange(len(datasets))
-    width = 0.18
+    n_strategies = len(ACCURACY_STRATEGIES)
+    width = 0.14
+    all_finite: List[float] = []
 
-    for i, strategy in enumerate(STRATEGIES):
+    for i, strategy in enumerate(ACCURACY_STRATEGIES):
         vals: List[float] = []
         rounds: List[Optional[int]] = []
         for ds in datasets:
@@ -225,7 +237,7 @@ def _accuracy_bar_on_ax(
             else:
                 vals.append(np.nan)
                 rounds.append(None)
-        offset = (i - 1.5) * width
+        offset = (i - (n_strategies - 1) / 2.0) * width
         bars = ax.bar(
             x + offset,
             vals,
@@ -233,6 +245,7 @@ def _accuracy_bar_on_ax(
             label=STRATEGY_LABELS[strategy],
             color=STRATEGY_COLORS[strategy],
         )
+        all_finite.extend(v for v in vals if np.isfinite(v))
         for bar, r in zip(bars, rounds):
             if r is None or not np.isfinite(bar.get_height()):
                 continue
@@ -254,7 +267,7 @@ def _accuracy_bar_on_ax(
         fontsize=11,
     )
     ax.grid(axis="y", alpha=0.3)
-    finite = [v for v in vals if np.isfinite(v)]
+    finite = all_finite
     if finite:
         lo = max(0.0, min(finite) - 0.05)
         hi = min(1.0, max(finite) + 0.05)
