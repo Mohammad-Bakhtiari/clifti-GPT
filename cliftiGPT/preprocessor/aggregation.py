@@ -311,7 +311,19 @@ def aggregate_secure_histogram_bin_edges(
     shared_cuts = secure_quantile_cuts(
         shared_H, shared_total, envelope_grid_tail, probs
     )
-    return shared_cuts.get_plain_text().cpu().numpy().astype(np.float32)
+    edges = shared_cuts.get_plain_text().cpu().numpy().astype(np.float32)
+    if edges.size != n_bins - 1:
+        raise ValueError(
+            f"Expected {n_bins - 1} secure histogram bin edges, got {edges.size}."
+        )
+    if not np.all(np.isfinite(edges)):
+        raise ValueError("Secure histogram bin edges contain non-finite values.")
+    if not np.any(edges > 0):
+        raise ValueError(
+            "Secure histogram bin edges are degenerate (all zero). "
+            "This usually indicates a CrypTen public/secret arithmetic bug."
+        )
+    return edges
 
 
 def aggregate_local_gene_sets(local_gene_sets: List[Set[str]]) -> Dict[int, str]:
