@@ -13,6 +13,7 @@ See analysis/plot_binning_benchmark.py for figures.
 import argparse
 import csv
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -117,6 +118,22 @@ def parse_args():
         help="adata.layers[layer] to bin; default uses adata.X.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--time",
+        action="store_true",
+        default=False,
+        help=(
+            "Also record wall-clock timings for plain vs SMPC aggregation of "
+            "the fed-weight-avg and fed-hist binning strategies on each "
+            "dataset. Writes timings.csv into --output_dir."
+        ),
+    )
+    parser.add_argument(
+        "--time_n_reps",
+        type=int,
+        default=3,
+        help="Repetitions per timed aggregation step (median is reported).",
+    )
     return parser.parse_args()
 
 
@@ -268,7 +285,9 @@ def evaluate_dataset(
     n_bins: int,
     grid_resolution: int,
     layer: Optional[str],
-) -> Tuple[Dict[str, Any], Dict[str, np.ndarray]]:
+    record_time: bool = False,
+    time_n_reps: int = 3,
+) -> Tuple[Dict[str, Any], Dict[str, np.ndarray], Optional[Dict[str, float]]]:
     adata = anndata.read_h5ad(adata_path)
 
     if layer is not None:
@@ -373,6 +392,38 @@ def evaluate_dataset(
 
     edges_centralized = np.quantile(pooled_nonzero, probs).astype(np.float32)
 
+    timings: Optional[Dict[str, float]] = None
+    if record_time:
+        def _median(fn) -> float:
+            fn()  # warm-up
+            samples = []
+            for _ in range(time_n_reps):
+                t0 = time.perf_counter()
+                fn()
+                samples.append(time.perf_counter() - t0)
+            return float(np.median(samples))
+
+        t_weighted_plain = _median(lambda: aggregate_bin_edges(local_edges_pairs))
+        t_weighted_smpc = _median(
+            lambda: aggregate_bin_edge_contributions_smpc(contrib_shares)
+        )
+        t_hist_plain = _median(
+            lambda: aggregate_histogram_bin_edges_plain(
+                client_histograms, client_n_list, value_grid, n_bins
+            )
+        )
+        t_hist_smpc = _median(
+            lambda: aggregate_secure_histogram_bin_edges(
+                hist_shares, n_shares_hist, value_grid_smpc, n_bins
+            )
+        )
+        timings = {
+            "fed-weight-avg": t_weighted_plain,
+            "fed-weight-avg-smpc": t_weighted_smpc,
+            "fed-hist": t_hist_plain,
+            "fed-hist-smpc": t_hist_smpc,
+        }
+
     strategy_edges = {
         "centralized": edges_centralized,
         "fed-weight-avg": edges_weighted,
@@ -419,7 +470,7 @@ def evaluate_dataset(
         "value_grid": value_grid,
         "value_grid_smpc": value_grid_smpc,
     }
-    return metrics, edges
+    return metrics, edges, timings
 
 
 def _long_rows(dataset: str, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -509,6 +560,7 @@ def main() -> None:
     long_rows: List[Dict[str, Any]] = []
     wide_rows: List[Dict[str, Any]] = []
     skipped: List[Dict[str, str]] = []
+    timing_rows: List[Dict[str, Any]] = []
 
     for name in requested:
         cfg = PRIMARY_DATASETS[name]
@@ -520,12 +572,14 @@ def main() -> None:
             skipped.append({"dataset": name, "reason": msg})
             continue
         try:
-            metrics, edges = evaluate_dataset(
+            metrics, edges, timings = evaluate_dataset(
                 adata_path=adata_path,
                 batch_key=cfg["batch_key"],
                 n_bins=args.n_bins,
                 grid_resolution=args.grid_resolution,
                 layer=args.layer,
+                record_time=args.time,
+                time_n_reps=args.time_n_reps,
             )
         except Exception as exc:
             msg = f"{type(exc).__name__}: {exc}"
@@ -537,6 +591,36 @@ def main() -> None:
         wide_row = {"dataset": name, **metrics}
         wide_rows.append(wide_row)
         long_rows.extend(_long_rows(name, metrics))
+
+        if timings is not None:
+            plain_t_weighted = timings["fed-weight-avg"]
+            plain_t_hist = timings["fed-hist"]
+            for strategy, t_seconds in timings.items():
+                if strategy.endswith("-smpc"):
+                    base = strategy.replace("-smpc", "")
+                    base_t = (
+                        plain_t_weighted if base == "fed-weight-avg" else plain_t_hist
+                    )
+                    overhead = (t_seconds / base_t) if base_t > 0 else float("nan")
+                else:
+                    overhead = 1.0
+                timing_rows.append(
+                    {
+                        "dataset": name,
+                        "n_clients": metrics["n_clients"],
+                        "n_cells": metrics["n_cells"],
+                        "n_nonzero": metrics["n_nonzero"],
+                        "strategy": strategy,
+                        "t_seconds": t_seconds,
+                        "crypto_overhead": overhead,
+                    }
+                )
+            print(
+                f"TIMING: weighted plain={plain_t_weighted*1e3:7.2f}ms "
+                f"smpc={timings['fed-weight-avg-smpc']*1e3:7.2f}ms | "
+                f"hist plain={plain_t_hist*1e3:7.2f}ms "
+                f"smpc={timings['fed-hist-smpc']*1e3:7.2f}ms"
+            )
 
         ds_out = per_dataset_dir / name
         ds_out.mkdir(parents=True, exist_ok=True)
@@ -585,6 +669,18 @@ def main() -> None:
         writer.writerows(skipped)
 
     _write_summary_md(output_dir / "summary.md", wide_rows)
+
+    if args.time:
+        timings_csv = output_dir / "timings.csv"
+        timing_fields = [
+            "dataset", "n_clients", "n_cells", "n_nonzero",
+            "strategy", "t_seconds", "crypto_overhead",
+        ]
+        with timings_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=timing_fields)
+            writer.writeheader()
+            writer.writerows(timing_rows)
+        print(f"Wrote: {timings_csv} ({len(timing_rows)} rows)")
 
     print(f"\nEvaluated {len(wide_rows)} / {len(requested)} datasets.")
     print(f"Wrote: {results_csv}")
