@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Multi-dataset federated binning benchmark (no model training).
 
-Evaluates batch-effect and heterogeneity impact of three federated binning
+Evaluates batch-effect and heterogeneity impact of four federated binning
 strategies on the five primary annotation benchmark datasets:
 
 - Cramér's V (client x bin association; higher = stronger batch effect)
@@ -31,8 +31,10 @@ from cliftiGPT.preprocessor.aggregation import (
     aggregate_bin_edge_contributions_smpc,
     aggregate_global_max_expr,
     aggregate_histogram_bin_edges_plain,
+    aggregate_secure_histogram_bin_edges,
     local_bin_edge_contribution,
     reveal_nonzero_total,
+    secure_reveal_envelope_max,
 )
 from cliftiGPT.utils import set_seed
 
@@ -68,12 +70,14 @@ FEDERATED_STRATEGIES = (
     "fed-weight-avg",
     "fed-weight-avg-smpc",
     "fed-hist",
+    "fed-hist-smpc",
 )
 
 METRIC_PREFIX = {
     "fed-weight-avg": "weighted",
     "fed-weight-avg-smpc": "weighted_smpc",
     "fed-hist": "hist",
+    "fed-hist-smpc": "hist_smpc",
 }
 
 BATCH_METRICS = ("cramers_v", "js_binned", "js_amplification")
@@ -341,10 +345,35 @@ def evaluate_dataset(
         client_histograms, client_n_list, value_grid, n_bins
     ).astype(np.float32)
 
+    max_shares = [
+        crypten.cryptensor(torch.tensor([float(m)], dtype=torch.float32))
+        for m in client_max_list
+    ]
+    n_shares_hist = [
+        crypten.cryptensor(torch.tensor([float(n)], dtype=torch.float32))
+        for n in client_n_list
+    ]
+    max_expr_smpc = secure_reveal_envelope_max(max_shares)
+    value_grid_smpc = np.linspace(
+        0.0, max_expr_smpc, grid_resolution + 1, dtype=np.float32
+    )
+    hist_shares = [
+        crypten.cryptensor(
+            torch.tensor(
+                np.histogram(nz, bins=value_grid_smpc)[0].astype(np.float32)
+            )
+        )
+        for nz in per_client_nonzero
+    ]
+    edges_hist_smpc = aggregate_secure_histogram_bin_edges(
+        hist_shares, n_shares_hist, value_grid_smpc, n_bins
+    ).astype(np.float32)
+
     strategy_edges = {
         "fed-weight-avg": edges_weighted,
         "fed-weight-avg-smpc": edges_weighted_smpc,
         "fed-hist": edges_hist,
+        "fed-hist-smpc": edges_hist_smpc,
     }
 
     per_strategy_bins: Dict[str, List[np.ndarray]] = {}
@@ -361,6 +390,7 @@ def evaluate_dataset(
         "n_bins": n_bins,
         "grid_resolution": grid_resolution,
         "max_expr": float(max_expr),
+        "max_expr_smpc": float(max_expr_smpc),
     }
 
     for strategy in FEDERATED_STRATEGIES:
@@ -379,7 +409,9 @@ def evaluate_dataset(
         "fed_weight_avg": edges_weighted,
         "fed_weight_avg_smpc": edges_weighted_smpc,
         "fed_hist": edges_hist,
+        "fed_hist_smpc": edges_hist_smpc,
         "value_grid": value_grid,
+        "value_grid_smpc": value_grid_smpc,
     }
     return metrics, edges
 
@@ -420,8 +452,8 @@ def _write_summary_md(
     lines = [
         "# Binning benchmark summary\n",
         "Batch-effect metrics (lower is better). JS_raw is pre-binning client heterogeneity.\n\n",
-        "| Metric | fed-weight-avg | fed-weight-avg-smpc | fed-hist |\n",
-        "|---|---|---|---|\n",
+        "| Metric | fed-weight-avg | fed-weight-avg-smpc | fed-hist | fed-hist-smpc |\n",
+        "|---|---|---|---|---|\n",
     ]
     for label, metric_key in [
         ("Cramér's V (client x bin)", "cramers_v"),
@@ -429,21 +461,23 @@ def _write_summary_md(
     ]:
         vals = [_mean(f"{metric_key}_{METRIC_PREFIX[s]}") for s in FEDERATED_STRATEGIES]
         lines.append(
-            f"| {label} | {vals[0]:.6g} | {vals[1]:.6g} | {vals[2]:.6g} |\n"
+            f"| {label} | {vals[0]:.6g} | {vals[1]:.6g} | {vals[2]:.6g} | {vals[3]:.6g} |\n"
         )
 
     lines.append("\n## Per dataset\n\n")
     lines.append(
-        "| Dataset | JS_raw | Cramér V weighted | Cramér V hist | JS amp weighted | JS amp hist |\n"
+        "| Dataset | JS_raw | Cramér V weighted | Cramér V hist | Cramér V hist SMPC | JS amp weighted | JS amp hist | JS amp hist SMPC |\n"
     )
-    lines.append("|---|---|---|---|---|---|\n")
+    lines.append("|---|---|---|---|---|---|---|---|\n")
     for row in wide_rows:
         lines.append(
             f"| {row['dataset']} | {row['js_raw']:.4g} "
             f"| {row['cramers_v_weighted']:.6g} "
             f"| {row['cramers_v_hist']:.6g} "
+            f"| {row['cramers_v_hist_smpc']:.6g} "
             f"| {row['js_amplification_weighted']:.6g} "
-            f"| {row['js_amplification_hist']:.6g} |\n"
+            f"| {row['js_amplification_hist']:.6g} "
+            f"| {row['js_amplification_hist_smpc']:.6g} |\n"
         )
     path.write_text("".join(lines))
 
@@ -504,9 +538,13 @@ def main() -> None:
         print(
             f"OK: {metrics['n_clients']} clients, js_raw={metrics['js_raw']:.4g}, "
             f"Cramér V weighted={metrics['cramers_v_weighted']:.6g}, "
+            f"weighted_smpc={metrics['cramers_v_weighted_smpc']:.6g}, "
             f"hist={metrics['cramers_v_hist']:.6g}, "
+            f"hist_smpc={metrics['cramers_v_hist_smpc']:.6g}, "
             f"JS amp weighted={metrics['js_amplification_weighted']:.6g}, "
-            f"hist={metrics['js_amplification_hist']:.6g}"
+            f"weighted_smpc={metrics['js_amplification_weighted_smpc']:.6g}, "
+            f"hist={metrics['js_amplification_hist']:.6g}, "
+            f"hist_smpc={metrics['js_amplification_hist_smpc']:.6g}"
         )
 
     long_fields = [
