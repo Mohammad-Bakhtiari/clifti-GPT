@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Multi-dataset federated binning benchmark (no model training).
 
-Evaluates batch-effect and heterogeneity impact of four federated binning
-strategies on the five primary annotation benchmark datasets:
+Evaluates batch-effect and heterogeneity impact of centralized and four
+federated binning strategies on the five primary annotation benchmark datasets:
 
 - Cramér's V (client x bin association; higher = stronger batch effect)
 - JS amplification (JS_binned / JS_raw; higher = binning inflates client separation)
@@ -72,8 +72,10 @@ FEDERATED_STRATEGIES = (
     "fed-hist",
     "fed-hist-smpc",
 )
+BINNING_STRATEGIES = ("centralized",) + FEDERATED_STRATEGIES
 
 METRIC_PREFIX = {
+    "centralized": "centralized",
     "fed-weight-avg": "weighted",
     "fed-weight-avg-smpc": "weighted_smpc",
     "fed-hist": "hist",
@@ -369,7 +371,10 @@ def evaluate_dataset(
         hist_shares, n_shares_hist, value_grid_smpc, n_bins
     ).astype(np.float32)
 
+    edges_centralized = np.quantile(pooled_nonzero, probs).astype(np.float32)
+
     strategy_edges = {
+        "centralized": edges_centralized,
         "fed-weight-avg": edges_weighted,
         "fed-weight-avg-smpc": edges_weighted_smpc,
         "fed-hist": edges_hist,
@@ -393,7 +398,7 @@ def evaluate_dataset(
         "max_expr_smpc": float(max_expr_smpc),
     }
 
-    for strategy in FEDERATED_STRATEGIES:
+    for strategy in BINNING_STRATEGIES:
         batch = strategy_batch_metrics(
             per_strategy_bins[strategy],
             unique_batches,
@@ -406,6 +411,7 @@ def evaluate_dataset(
         metrics[f"js_amplification_{prefix}"] = batch["js_amplification"]
 
     edges = {
+        "centralized": edges_centralized,
         "fed_weight_avg": edges_weighted,
         "fed_weight_avg_smpc": edges_weighted_smpc,
         "fed_hist": edges_hist,
@@ -426,7 +432,7 @@ def _long_rows(dataset: str, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
         "js_raw": metrics["js_raw"],
     }
 
-    for strategy in FEDERATED_STRATEGIES:
+    for strategy in BINNING_STRATEGIES:
         prefix = METRIC_PREFIX[strategy]
         for metric_name in BATCH_METRICS:
             rows.append({
@@ -452,16 +458,16 @@ def _write_summary_md(
     lines = [
         "# Binning benchmark summary\n",
         "Batch-effect metrics (lower is better). JS_raw is pre-binning client heterogeneity.\n\n",
-        "| Metric | fed-weight-avg | fed-weight-avg-smpc | fed-hist | fed-hist-smpc |\n",
-        "|---|---|---|---|---|\n",
+        "| Metric | centralized | fed-weight-avg | fed-weight-avg-smpc | fed-hist | fed-hist-smpc |\n",
+        "|---|---|---|---|---|---|\n",
     ]
     for label, metric_key in [
         ("Cramér's V (client x bin)", "cramers_v"),
         ("JS amplification (binned/raw)", "js_amplification"),
     ]:
-        vals = [_mean(f"{metric_key}_{METRIC_PREFIX[s]}") for s in FEDERATED_STRATEGIES]
+        vals = [_mean(f"{metric_key}_{METRIC_PREFIX[s]}") for s in BINNING_STRATEGIES]
         lines.append(
-            f"| {label} | {vals[0]:.6g} | {vals[1]:.6g} | {vals[2]:.6g} | {vals[3]:.6g} |\n"
+            f"| {label} | {vals[0]:.6g} | {vals[1]:.6g} | {vals[2]:.6g} | {vals[3]:.6g} | {vals[4]:.6g} |\n"
         )
 
     lines.append("\n## Per dataset\n\n")
@@ -555,7 +561,7 @@ def main() -> None:
         "dataset", "n_clients", "n_cells", "n_nonzero", "js_raw",
         "n_bins", "grid_resolution", "max_expr",
     ]
-    for strategy in FEDERATED_STRATEGIES:
+    for strategy in BINNING_STRATEGIES:
         prefix = METRIC_PREFIX[strategy]
         for metric_name in BATCH_METRICS:
             wide_fields.append(f"{metric_name}_{prefix}")

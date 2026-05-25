@@ -24,8 +24,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-BINNING_STRATEGIES = ("fed-weight-avg", "fed-weight-avg-smpc", "fed-hist", "fed-hist-smpc")
-ACCURACY_STRATEGIES = ("centralized",) + BINNING_STRATEGIES
+PLOT_STRATEGIES = (
+    "centralized",
+    "fed-weight-avg",
+    "fed-weight-avg-smpc",
+    "fed-hist",
+    "fed-hist-smpc",
+)
 STRATEGY_LABELS = {
     "centralized": "Centralized",
     "fed-weight-avg": "Weighted avg",
@@ -117,7 +122,7 @@ def _load_best_accuracy(csv_path: Path) -> pd.DataFrame:
         .replace({"": pd.NA, "<NA>": pd.NA})
         .fillna("centralized")
     )
-    df = df[df["prep_mode"].isin(ACCURACY_STRATEGIES)]
+    df = df[df["prep_mode"].isin(PLOT_STRATEGIES)]
     if df.empty:
         return pd.DataFrame(
             columns=["dataset", "prep_mode", "best_accuracy", "best_round"]
@@ -162,14 +167,15 @@ def _grouped_bar_on_ax(
 
     datasets = list(sub["dataset"].unique())
     x = np.arange(len(datasets))
-    width = 0.18
+    n_strategies = len(PLOT_STRATEGIES)
+    width = 0.14
 
-    for i, strategy in enumerate(BINNING_STRATEGIES):
+    for i, strategy in enumerate(PLOT_STRATEGIES):
         vals = []
         for ds in datasets:
             row = sub[(sub["dataset"] == ds) & (sub["strategy"] == strategy)]
             vals.append(float(row["value"].iloc[0]) if len(row) else np.nan)
-        offset = (i - 1.5) * width
+        offset = (i - (n_strategies - 1) / 2.0) * width
         ax.bar(
             x + offset,
             vals,
@@ -220,11 +226,11 @@ def _accuracy_bar_on_ax(
         return
 
     x = np.arange(len(datasets))
-    n_strategies = len(ACCURACY_STRATEGIES)
+    n_strategies = len(PLOT_STRATEGIES)
     width = 0.14
     all_finite: List[float] = []
 
-    for i, strategy in enumerate(ACCURACY_STRATEGIES):
+    for i, strategy in enumerate(PLOT_STRATEGIES):
         vals: List[float] = []
         rounds: List[Optional[int]] = []
         for ds in datasets:
