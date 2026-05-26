@@ -318,11 +318,6 @@ def _sort_workflow_table(sub: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _config_group_separator() -> str:
-    """Thick rule with spacing between configuration blocks."""
-    return r"\addlinespace{0.6em}" + "\n" + r"\specialrule{0.9pt}{0pt}{0.6em}"
-
-
 def _workflow_table_colspec() -> str:
     return (
         r"@{} "
@@ -363,14 +358,11 @@ def _write_workflow_table(
     lines.append(r"\endhead")
 
     sub = _sort_workflow_table(sub)
-    first_group = True
-    for payload, group in sub.groupby("payload", sort=False):
-        if not first_group:
-            lines.append(_config_group_separator())
-        first_group = False
-
+    groups = list(sub.groupby("payload", sort=False))
+    for group_idx, (payload, group) in enumerate(groups):
         config = _fmt_payload_latex(str(payload))
         n_rows = len(group)
+        is_last_group = group_idx == len(groups) - 1
         for row_idx, (_, row) in enumerate(group.iterrows()):
             mode = _fmt_mode(str(row["mode"]))
             n_clients = int(row["n_clients"])
@@ -381,9 +373,15 @@ def _write_workflow_table(
                 config_cell = rf"\multirow{{{n_rows}}}{{*}}{{{config}}}"
             else:
                 config_cell = ""
+            if row_idx == n_rows - 1 and not is_last_group:
+                # longtable + multirow: booktabs \midrule breaks the next row;
+                # use \noalign{\hrule} immediately after the row break instead.
+                row_end = r" \\ \noalign{\vskip 5pt\hrule height 0.9pt\vskip 5pt}"
+            else:
+                row_end = r" \\"
             lines.append(
                 f"{mode} & {n_clients} & {config_cell} & "
-                f"{bytes_str} & {time_str} & {overhead:.1f}$\\times$ \\\\"
+                f"{bytes_str} & {time_str} & {overhead:.1f}$\\times${row_end}"
             )
 
     lines.append(r"\bottomrule")
