@@ -84,7 +84,6 @@ def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
         ax_ft.set_title(f"Fine-tuning, |θ|={theta_target:,}")
         ax_ft.set_xticks(sorted(ft_t["n_clients"].unique()))
         ax_ft.legend(loc="upper left", frameon=False)
-        ax_ft.grid(alpha=0.3)
 
     knn = df[df["workflow"] == "reference_mapping"].copy()
     if not knn.empty:
@@ -112,7 +111,6 @@ def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
         ax_knn.set_xscale("log")
         ax_knn.set_yscale("log")
         ax_knn.legend(loc="upper left", frameon=False)
-        ax_knn.grid(alpha=0.3, which="both")
 
     fig.tight_layout()
     _save(fig, out_dir / "comm_cost_scaling.png")
@@ -209,7 +207,6 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
     ax.set_yscale("log")
     ax.set_title("Simulated MPC wall-clock per workflow")
     ax.legend(loc="upper left", frameon=False)
-    ax.grid(alpha=0.3, axis="y", which="both")
     fig.tight_layout()
     _save(fig, out_dir / "comm_cost_wallclock.png")
 
