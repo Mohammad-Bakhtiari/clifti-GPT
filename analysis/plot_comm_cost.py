@@ -24,7 +24,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -40,6 +39,8 @@ BAR_EDGE_WIDTH = 0.6
 
 
 def _apply_style() -> None:
+    import matplotlib.pyplot as plt
+
     plt.rcParams.update(
         {
             "font.size": FONT_SIZE,
@@ -53,6 +54,8 @@ def _apply_style() -> None:
 
 
 def _save(fig, path: Path) -> None:
+    import matplotlib.pyplot as plt
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -61,6 +64,8 @@ def _save(fig, path: Path) -> None:
 
 def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
     """Two-panel bandwidth scaling: FT vs C and KNN vs n_ref."""
+    import matplotlib.pyplot as plt
+
     _apply_style()
     fig, (ax_ft, ax_knn) = plt.subplots(1, 2, figsize=(9, 3.4))
 
@@ -124,6 +129,8 @@ def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
 
 def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
     """Median wall-clock per workflow with overhead annotation."""
+    import matplotlib.pyplot as plt
+
     _apply_style()
 
     workflows = ["fine_tuning", "reference_mapping", "binning"]
@@ -288,6 +295,34 @@ def _fmt_mode(mode: str) -> str:
     return labels.get(mode, mode.replace("_", "\\_"))
 
 
+_MODE_SORT_ORDER = {
+    "plain": 0,
+    "smpc": 1,
+    "fed-weight-avg": 0,
+    "fed-weight-avg-smpc": 1,
+    "fed-hist": 2,
+    "fed-hist-smpc": 3,
+}
+
+
+def _sort_workflow_table(sub: pd.DataFrame) -> pd.DataFrame:
+    """Group rows by configuration, then C, then mode."""
+    out = sub.copy()
+    out["_mode_order"] = out["mode"].map(
+        lambda m: _MODE_SORT_ORDER.get(str(m), 99)
+    )
+    return (
+        out.sort_values(["payload", "n_clients", "_mode_order"], kind="stable")
+        .drop(columns="_mode_order")
+        .reset_index(drop=True)
+    )
+
+
+def _config_group_separator() -> str:
+    """Thick rule with spacing between configuration blocks."""
+    return r"\addlinespace{0.6em}" + "\n" + r"\specialrule{0.9pt}{0pt}{0.6em}"
+
+
 def _workflow_table_colspec() -> str:
     return (
         r"@{} "
@@ -327,17 +362,29 @@ def _write_workflow_table(
     lines.append(r"\midrule")
     lines.append(r"\endhead")
 
-    for _, row in sub.iterrows():
-        mode = _fmt_mode(str(row["mode"]))
-        config = _fmt_payload_latex(str(row["payload"]))
-        n_clients = int(row["n_clients"])
-        bytes_str = _fmt_bytes(float(row["bytes_per_client_total"]))
-        time_str = _fmt_time(float(row["t_seconds"]))
-        overhead = float(row["crypto_overhead"])
-        lines.append(
-            f"{mode} & {n_clients} & {config} & "
-            f"{bytes_str} & {time_str} & {overhead:.1f}$\\times$ \\\\"
-        )
+    sub = _sort_workflow_table(sub)
+    first_group = True
+    for payload, group in sub.groupby("payload", sort=False):
+        if not first_group:
+            lines.append(_config_group_separator())
+        first_group = False
+
+        config = _fmt_payload_latex(str(payload))
+        n_rows = len(group)
+        for row_idx, (_, row) in enumerate(group.iterrows()):
+            mode = _fmt_mode(str(row["mode"]))
+            n_clients = int(row["n_clients"])
+            bytes_str = _fmt_bytes(float(row["bytes_per_client_total"]))
+            time_str = _fmt_time(float(row["t_seconds"]))
+            overhead = float(row["crypto_overhead"])
+            if row_idx == 0:
+                config_cell = rf"\multirow{{{n_rows}}}{{*}}{{{config}}}"
+            else:
+                config_cell = ""
+            lines.append(
+                f"{mode} & {n_clients} & {config_cell} & "
+                f"{bytes_str} & {time_str} & {overhead:.1f}$\\times$ \\\\"
+            )
 
     lines.append(r"\bottomrule")
     lines.append(r"\end{longtable}")
