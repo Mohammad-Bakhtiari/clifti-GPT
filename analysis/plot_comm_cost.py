@@ -6,10 +6,11 @@ tables and macros, run ``analysis/render_comm_cost_tex.py`` before
 ``pdflatex``.
 
 Figures:
-    comm_cost_scaling_ft.png   — fine-tuning bytes vs C (plain vs SMPC)
-    comm_cost_scaling_knn.png  — KNN bytes vs total reference size
-    comm_cost_scaling.png      — legacy two-panel composite (FT + KNN)
-    comm_cost_wallclock.png    — measured median t (s) per workflow
+    comm_cost_legend.png         — shared horizontal Plaintext/SMPC legend
+    comm_cost_scaling_ft.png     — fine-tuning bytes vs C
+    comm_cost_scaling_knn.png    — KNN bytes vs total reference size
+    comm_cost_scaling.png        — legacy two-panel composite (FT + KNN)
+    comm_cost_wallclock.png      — measured median t (s) per workflow
 """
 
 import argparse
@@ -68,6 +69,60 @@ def _save(fig, path: Path) -> None:
     print(f"Figure written to {path} ({PANEL_PX[0]}x{PANEL_PX[1]} px)")
 
 
+def _save_legend(fig, path: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=PANEL_DPI, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"Legend written to {path}")
+
+
+def plot_legend(out_dir: Path) -> None:
+    """Shared horizontal legend for all communication-cost panels."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(4.0, 0.45))
+    ax.axis("off")
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            color=PLAIN_COLOR,
+            marker="o",
+            linestyle="-",
+            linewidth=1.5,
+            markersize=6,
+            markeredgecolor=BAR_EDGE_COLOR,
+            markeredgewidth=BAR_EDGE_WIDTH,
+            label="Plaintext",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=SMPC_COLOR,
+            marker="*",
+            linestyle="-",
+            linewidth=1.5,
+            markersize=9,
+            markeredgecolor=BAR_EDGE_COLOR,
+            markeredgewidth=BAR_EDGE_WIDTH,
+            label="SMPC",
+        ),
+    ]
+    ax.legend(
+        handles=handles,
+        loc="center",
+        ncol=2,
+        frameon=False,
+        handlelength=2.4,
+        columnspacing=1.6,
+    )
+    _save_legend(fig, out_dir / "comm_cost_legend.png")
+
+
 def _plot_ft_scaling_ax(ax, df: pd.DataFrame) -> None:
     ft = df[df["workflow"] == "fine_tuning"].copy()
     if ft.empty:
@@ -76,13 +131,16 @@ def _plot_ft_scaling_ax(ax, df: pd.DataFrame) -> None:
     theta_target = int(ft["theta"].mode().iloc[0])
     ft_t = ft[ft["theta"] == theta_target].copy()
     ft_t.sort_values(["mode", "n_clients"], inplace=True)
-    for mode, color in [("plain", PLAIN_COLOR), ("smpc", SMPC_COLOR)]:
+    for mode, color, marker in [
+        ("plain", PLAIN_COLOR, "o"),
+        ("smpc", SMPC_COLOR, "*"),
+    ]:
         sub = ft_t[ft_t["mode"] == mode]
         if not sub.empty:
             ax.plot(
                 sub["n_clients"],
                 sub["bytes_per_client_total"] / 1e6,
-                "o-",
+                marker + "-",
                 color=color,
                 label=mode.upper() if mode == "smpc" else "Plaintext",
                 markeredgecolor=BAR_EDGE_COLOR,
@@ -92,7 +150,6 @@ def _plot_ft_scaling_ax(ax, df: pd.DataFrame) -> None:
     ax.set_ylabel("Bytes / client (MB)")
     ax.set_title(f"Fine-tuning, |θ|={theta_target:,}")
     ax.set_xticks(sorted(ft_t["n_clients"].unique()))
-    ax.legend(loc="upper left", frameon=False)
 
 
 def _plot_knn_scaling_ax(ax, df: pd.DataFrame) -> None:
@@ -105,13 +162,16 @@ def _plot_knn_scaling_ax(ax, df: pd.DataFrame) -> None:
     ref_C = int(knn["n_clients"].mode().iloc[0])
     slc = knn[(knn["n_q"] == ref_nq) & (knn["n_clients"] == ref_C)].copy()
     slc.sort_values(["mode", "n_ref"], inplace=True)
-    for mode, color in [("plain", PLAIN_COLOR), ("smpc", SMPC_COLOR)]:
+    for mode, color, marker in [
+        ("plain", PLAIN_COLOR, "o"),
+        ("smpc", SMPC_COLOR, "*"),
+    ]:
         sub = slc[slc["mode"] == mode]
         if not sub.empty:
             ax.plot(
                 sub["n_ref"],
                 sub["bytes_per_client_total"] / 1e6,
-                "s-",
+                marker + "-",
                 color=color,
                 label="SMPC" if mode == "smpc" else "Plaintext",
                 markeredgecolor=BAR_EDGE_COLOR,
@@ -122,7 +182,6 @@ def _plot_knn_scaling_ax(ax, df: pd.DataFrame) -> None:
     ax.set_title(f"KNN, n_q={ref_nq}, C={ref_C}")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.legend(loc="upper left", frameon=False)
 
 
 def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
@@ -149,7 +208,7 @@ def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
 
 
 def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
-    """Median wall-clock per workflow with overhead annotation."""
+    """Median wall-clock per workflow."""
     import matplotlib.pyplot as plt
 
     _apply_style()
@@ -159,7 +218,6 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
 
     bars: List[Dict] = []
     x_labels: List[str] = []
-    overheads: List[float] = []
 
     for wf in workflows:
         wf_df = df[df["workflow"] == wf]
@@ -178,7 +236,6 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
                 t_smpc = float(smpc["t_seconds"].median())
                 x_labels.append(label)
                 bars.append({"label": label, "t_plain": t_plain, "t_smpc": t_smpc})
-                overheads.append(t_smpc / t_plain if t_plain > 0 else float("nan"))
         else:
             plain = wf_df[wf_df["mode"] == "plain"]
             smpc = wf_df[wf_df["mode"] == "smpc"]
@@ -194,7 +251,6 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
             bars.append(
                 {"label": label_map[wf], "t_plain": t_plain, "t_smpc": t_smpc}
             )
-            overheads.append(t_smpc / t_plain if t_plain > 0 else float("nan"))
 
     if not bars:
         print("No wall-clock rows in CSV; skipping wall-clock figure.")
@@ -212,7 +268,6 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
         color=PLAIN_COLOR,
         edgecolor=BAR_EDGE_COLOR,
         linewidth=BAR_EDGE_WIDTH,
-        label="Plaintext",
     )
     ax.bar(
         x + width / 2,
@@ -221,24 +276,12 @@ def plot_wallclock(df: pd.DataFrame, out_dir: Path) -> None:
         color=SMPC_COLOR,
         edgecolor=BAR_EDGE_COLOR,
         linewidth=BAR_EDGE_WIDTH,
-        label="SMPC",
     )
-    for i, ovh in enumerate(overheads):
-        y_top = max(plain_vals[i], smpc_vals[i])
-        ax.text(
-            x[i],
-            y_top * 1.05,
-            f"{ovh:.1f}x",
-            ha="center",
-            va="bottom",
-            fontsize=FONT_SIZE - 1,
-        )
     ax.set_xticks(x)
     ax.set_xticklabels(x_labels, rotation=35, ha="right")
     ax.set_ylabel("Wall-clock (s)")
     ax.set_yscale("log")
     ax.set_title("Simulated MPC wall-clock")
-    ax.legend(loc="upper left", frameon=False)
     fig.tight_layout()
     _save(fig, out_dir / "comm_cost_wallclock.png")
 
@@ -262,6 +305,7 @@ def main() -> None:
     args = parse_args()
     df = pd.read_csv(args.results_csv)
     out_dir = Path(args.out_dir)
+    plot_legend(out_dir)
     plot_scaling(df, out_dir)
     plot_wallclock(df, out_dir)
 
