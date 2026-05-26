@@ -258,29 +258,97 @@ def _latex_int(n: int) -> str:
     return str(n)
 
 
+CONFIG_MAX_CHARS = 10
+CONFIG_COL_WIDTH = "1.35cm"
+
+
+def _join_config_lines(parts: List[str]) -> str:
+    return r" \\ ".join(parts)
+
+
+def _param_lines(name: str, value: str) -> List[str]:
+    """One table parameter; each line has at most CONFIG_MAX_CHARS characters."""
+    one_line = f"${name}={value}$"
+    if len(one_line) <= CONFIG_MAX_CHARS:
+        return [one_line]
+
+    lines = [f"${name}=$"]
+    if " \\times " in value:
+        mant, exp = value.split(" \\times ", 1)
+        lines.extend([f"${mant}$", r"$\times$", f"${exp}$"])
+    else:
+        chunk = f"${value}$"
+        while chunk:
+            if len(chunk) <= CONFIG_MAX_CHARS:
+                lines.append(chunk)
+                break
+            lines.append(chunk[:CONFIG_MAX_CHARS])
+            chunk = chunk[CONFIG_MAX_CHARS:]
+    return lines
+
+
+def _fmt_theta_lines(theta: int) -> List[str]:
+    lines = [r"$|\theta|$"]
+    value = _latex_int(theta)
+    eq_line = f"$={value}$"
+    if len(eq_line) <= CONFIG_MAX_CHARS:
+        lines.append(eq_line)
+        return lines
+
+    if " \\times " in value:
+        mant, exp = value.split(" \\times ", 1)
+        lines.extend([f"$={mant}$", r"$\times$", f"${exp}$"])
+    else:
+        lines.append(eq_line)
+    return lines
+
+
 def _fmt_payload_latex(payload: str) -> str:
-    """Render configuration strings in a dedicated math column."""
+    """Render configuration strings on multiple narrow lines."""
     payload = str(payload).strip()
     if payload.startswith("theta="):
         theta = int(payload.split("=", 1)[1])
-        return f"$|\\theta| = {_latex_int(theta)}$"
+        return _join_config_lines(_fmt_theta_lines(theta))
 
     knn_match = re.fullmatch(
         r"n_q=(\d+),n_r=(\d+),d=(\d+),k=(\d+)", payload
     )
     if knn_match:
         n_q, n_r, d, k = knn_match.groups()
-        return (
-            f"$n_q={n_q}$, $n_r={_latex_int(int(n_r))}$, "
-            f"$d={d}$, $k={k}$"
-        )
+        parts: List[str] = []
+        for name, val in (
+            ("n_q", n_q),
+            ("n_r", _latex_int(int(n_r))),
+            ("d", d),
+            ("k", k),
+        ):
+            parts.extend(_param_lines(name, val))
+        return _join_config_lines(parts)
 
     bin_match = re.fullmatch(r"n_bins=(\d+),M=(\d+)", payload)
     if bin_match:
         n_bins, grid = bin_match.groups()
-        return f"$B={n_bins}$, $M={grid}$"
+        parts: List[str] = []
+        parts.extend(_param_lines("B", n_bins))
+        parts.extend(_param_lines("M", grid))
+        return _join_config_lines(parts)
 
-    return payload.replace("_", "\\_")
+    chunk = payload.replace("_", "\\_")
+    if len(chunk) <= CONFIG_MAX_CHARS:
+        return chunk
+    lines = [
+        chunk[i : i + CONFIG_MAX_CHARS]
+        for i in range(0, len(chunk), CONFIG_MAX_CHARS)
+    ]
+    return _join_config_lines(lines)
+
+
+def _config_multirow_cell(config: str, n_rows: int) -> str:
+    return (
+        rf"\multirow{{{n_rows}}}{{*}}{{"
+        rf"\begin{{minipage}}[t]{{{CONFIG_COL_WIDTH}}}\raggedright "
+        rf"{config}\end{{minipage}}}}"
+    )
 
 
 def _fmt_mode(mode: str) -> str:
@@ -323,7 +391,7 @@ def _workflow_table_colspec() -> str:
         r"@{} "
         r">{\raggedright\arraybackslash}p{1.7cm} "
         r"c "
-        r">{\raggedright\arraybackslash}p{5.4cm} "
+        r">{\raggedright\arraybackslash}p{" + CONFIG_COL_WIDTH + "} "
         r">{\raggedleft\arraybackslash}p{1.6cm} "
         r">{\raggedleft\arraybackslash}p{1.5cm} "
         r">{\raggedleft\arraybackslash}p{1.3cm} "
@@ -370,7 +438,7 @@ def _write_workflow_table(
             time_str = _fmt_time(float(row["t_seconds"]))
             overhead = float(row["crypto_overhead"])
             if row_idx == 0:
-                config_cell = rf"\multirow{{{n_rows}}}{{*}}{{{config}}}"
+                config_cell = _config_multirow_cell(config, n_rows)
             else:
                 config_cell = ""
             if row_idx == n_rows - 1 and not is_last_group:
