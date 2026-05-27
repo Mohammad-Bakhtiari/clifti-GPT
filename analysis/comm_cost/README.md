@@ -1,140 +1,66 @@
 # Communication-cost analysis
 
-This package contains the scripts used to quantify the communication
-cost of the federated Clifti-GPT workflows (fine-tuning, federated KNN
-reference mapping, federated binning) under plaintext and CrypTen-based
-SMPC modes. All generated artifacts — CSV, figures, LaTeX fragments, and
-the supplement PDF — land in `output/comm_cost/`.
+Benchmarks communication cost for federated fine-tuning, reference mapping (KNN),
+and binning. Produces analytical bandwidth (bytes) and GPU SMPC wall-clock timings
+in `output/comm_cost/`.
 
-## Scope
+## Parameters
 
-For each workflow and mode the analysis reports:
+Two independent counts:
 
-- Analytical per-client and per-federation bandwidth (bytes).
-- Median wall-clock for a representative kernel under CrypTen running
-  as a true multi-process simulated MPC.
-- The ratio of SMPC to plaintext wall-clock (crypto overhead).
+- **C (`n_clients`)** — federated data-holding clients. Swept per workflow; scales
+  federation totals.
+- **P (`n_parties`)** — SMPC parties. Fixed per run (default **3**). Share factor
+  in the byte model is **(P − 1)**; sets CrypTen `WORLD_SIZE` for wall-clock.
 
-## Clients vs. parties
+**P** is set via `--n_parties`, env `COMM_COST_N_PARTIES`, or default `3`.
 
-The analysis treats two parameters as independent:
+### Default sweeps
 
-- `C = n_clients`: number of federated data-holding clients. Drives
-  federation totals and is swept per workflow.
-- `P = n_parties`: number of SMPC computational parties. Fixed across
-  a run. Drives the additive-sharing share factor `(P - 1)` and
-  determines CrypTen's world size at runtime.
-
-Plaintext federation costs scale with `C` only. SMPC per-client costs
-scale with `(P - 1)` and are independent of `C`; federation totals
-still scale with `C`.
-
-## Files
-
-| File | Purpose |
+| Workflow | Swept parameters |
 |---|---|
-| `comm_cost.py` | Main benchmark. Writes CSV and metadata under `output/comm_cost/`. |
-| `regenerate_comm_cost_at_c.py` | Recomputes analytical bytes for a fixed `P` without CrypTen. Interpolates wall-clock from a prior CSV. |
-| `plot_comm_cost.py` | Renders PNG figures into `output/comm_cost/`. |
-| `render_comm_cost_tex.py` | Reads CSV; writes LaTeX tables, macros, and syncs `communication_cost.tex` into `output/comm_cost/`. |
-| `communication_cost.tex` | Supplement source (edited here; synced to output before `pdflatex`). |
-| `Makefile` | `make pdf` runs the full LaTeX build in `output/comm_cost/`. |
+| Fine-tuning | `\|θ\|` ∈ {1M, 10M}, C ∈ {2, 3, 5}, R = 5 rounds (bytes only) |
+| Reference mapping | n_q ∈ {500, 2000}, n_r ∈ {1000, 5000}, C ∈ {2, 5}, k ∈ {5, 20}, d = 128 |
+| Binning | C ∈ {2, 5, 10}, n_bins = 51, grid M = 4096 |
 
-## Setting the number of parties
+Wall-clock uses **5** timed repetitions per config (median reported) unless `--quick`.
 
-`P` is resolved in this order:
-
-1. `--n_parties` on the CLI.
-2. Environment variable `COMM_COST_N_PARTIES`.
-3. Default `3`.
-
-Examples:
-
-```bash
-python analysis/comm_cost/comm_cost.py --n_parties 3
-export COMM_COST_N_PARTIES=3 && python analysis/comm_cost/comm_cost.py
-```
-
-SMPC wall-clock is timed under `crypten.mpc.run_multiprocess(P)`, which
-spawns `P` synchronized worker processes on a single host and sets
-CrypTen's `WORLD_SIZE`, `RANK`, and rendezvous variables inside each
-child. Each worker asserts `comm.get().get_world_size() == P`.
-
-## Running the full pipeline
-
-CrypTen and PyTorch are required for the wall-clock benchmark.
-
-**GPU SMPC (CrypTen multiprocess):** each SMPC timing re-execs this script in a
-clean subprocess (CrypTen forks internally and cannot inherit a CUDA context
-from the main benchmark process). Export **one** GPU before the top-level run:
-
-```bash
-export CUDA_VISIBLE_DEVICES=0
-export COMM_COST_N_PARTIES=3
-python analysis/comm_cost/comm_cost.py --device cuda
-```
-
-Use `--device cpu` if GPU SMPC still fails. Plaintext fine-tuning and KNN
-(FAISS) always run on CPU; only SMPC wall-clock uses GPU.
+## Run
 
 From the repository root:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export COMM_COST_N_PARTIES=3
 
-python analysis/comm_cost/comm_cost.py --device cuda
+python analysis/comm_cost/comm_cost.py
 python analysis/comm_cost/plot_comm_cost.py
 python analysis/comm_cost/render_comm_cost_tex.py
 ```
 
-**Runtime:** The default sweep times SMPC on up to 50M parameters with
-`n_reps=5` and `P=3` CrypTen processes. On CPU this can take many hours;
-use `--device cuda` on GPU nodes (default `auto` picks CUDA when available).
-Use `--quick` to verify the pipeline in minutes:
+SMPC wall-clock runs in an isolated subprocess per config. Use one visible GPU
+(`CUDA_VISIBLE_DEVICES=0`); all P parties share it.
+
+### `--quick`
+
+Smoke test: one small config per workflow, `n_reps=1` (e.g. |θ| = 10k, C = 2).
+Use to verify the pipeline before the full sweep.
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0
-python analysis/comm_cost/comm_cost.py --quick --device cuda
+python analysis/comm_cost/comm_cost.py --quick
 ```
 
-Analytical byte counts in the CSV do not depend on wall-clock; you can
-also recompute bytes without CrypTen via `regenerate_comm_cost_at_c.py`
-and keep timings from an earlier full run.
+## Files
 
-Or build the supplement PDF in one step:
-
-```bash
-make -C analysis/comm_cost pdf
-```
-
-To refresh bytes for a different `P` without re-running CrypTen:
-
-```bash
-python analysis/comm_cost/regenerate_comm_cost_at_c.py --n_parties 3 --backup
-```
+| File | Role |
+|---|---|
+| `comm_cost.py` | Main benchmark → CSV + metadata |
+| `plot_comm_cost.py` | Figures from CSV |
+| `render_comm_cost_tex.py` | LaTeX table fragments and macros from CSV |
+| `regenerate_comm_cost_at_c.py` | Recompute analytical bytes for a new P |
 
 ## Outputs
 
-**`output/comm_cost/`** (all generated artifacts):
-
-- `comm_cost_results.csv` — one row per `(workflow, mode, n_clients, n_parties, payload)`.
-- `comm_cost_metadata.json` — CLI arguments, resolved `n_parties`, caveats.
-- `comm_cost_*.png` — bandwidth scaling and wall-clock panels.
-- `communication_cost_*.tex` — workflow tables, wrapper, headline macros
-  (`\smpcParties`, `\ftBytesRatioMax`, ...), copy-paste bundle.
-- `communication_cost.pdf` — supplementary PDF (after `make pdf`).
-
-## Caveats
-
-- Wall-clock is measured under CrypTen's single-host multi-process
-  simulator. It captures encryption, fixed-point, and protocol cost,
-  but excludes real inter-site network latency.
-- Beaver-triple precomputation is assumed offline (CrypTen default)
-  and is not included in the SMPC wall-clock.
-- Analytical formulas assume CrypTen additive sharing with `float32`
-  payloads. A different sharing scheme would require updating the
-  formulas and the supplement prose.
-- `regenerate_comm_cost_at_c.py` is bytes-exact for the chosen `P` but
-  inherits wall-clock values from the source CSV. Re-run `comm_cost.py`
-  for measured timings.
+`output/comm_cost/comm_cost_results.csv`, `comm_cost_metadata.json`, `comm_cost_*.png`,
+`communication_cost_table.tex`, `communication_cost_table_*.tex`, `communication_cost_macros.tex`

@@ -1,28 +1,5 @@
 #!/usr/bin/env python
-"""Communication-cost benchmark for federated workflows.
-
-Addresses reviewer R3 ("wall-clock time, bandwidth usage, cryptographic
-overhead, runtime scaling") with two artifacts:
-
-1. **Analytical bandwidth model**. Closed-form byte counts per workflow
-   derived from tensor shapes and the CrypTen additive-sharing convention.
-   No network instrumentation is required because the bytes are determined
-   by the protocol, not by transport latency.
-
-2. **Simulated wall-clock benchmark**. Runs ``FedAvg.aggregate_plain`` vs
-   ``aggregate_smpc``, federated KNN (plaintext FAISS vs SMPC
-   ``top_k_encrypted_distances``), and federated binning aggregation
-   (plain vs SMPC) under CrypTen's single-process simulated MPC. Records
-   median wall-clock time; the SMPC times exclude any real network I/O
-   (none happens) but include the encryption/decryption and CrypTen
-   protocol overhead that would dominate cryptographic cost in a real
-   deployment.
-
-Outputs:
-    output/comm_cost/comm_cost_results.csv
-    output/comm_cost/comm_cost_metadata.json
-    output/comm_cost/comm_cost_*.png
-"""
+"""Communication-cost benchmark: analytical bytes and GPU SMPC wall-clock."""
 
 import argparse
 import csv
@@ -42,21 +19,16 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analysis.comm_cost.paths import COMM_COST_OUTPUT_DIR, REPO_ROOT  # noqa: E402
+from analysis.comm_cost import COMM_COST_OUTPUT_DIR, REPO_ROOT  # noqa: E402
 
 import numpy as np
-
-# torch / crypten are imported lazily inside the wall-clock benchmark
-# functions so the analytical formulas remain usable without the heavy
-# scientific stack.
 
 FLOAT32_BYTES = 4
 INT64_BYTES = 8
 SHA256_HEX_BYTES = 64
+SMPC_DEVICE = "cuda"
 
-# Env var read by ``resolve_n_parties()`` when ``--n_parties`` is omitted.
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
-COMM_COST_GPU_IDS_ENV = "COMM_COST_GPU_IDS"
 _DEFAULT_N_PARTIES = 3
 
 
@@ -65,7 +37,6 @@ def _log(msg: str) -> None:
 
 
 def resolve_n_parties(cli_value: Optional[int] = None) -> int:
-    """Resolve SMPC party count P: CLI ``--n_parties`` > env > default."""
     if cli_value is not None:
         return cli_value
     env_val = os.environ.get(COMM_COST_N_PARTIES_ENV)
@@ -73,23 +44,16 @@ def resolve_n_parties(cli_value: Optional[int] = None) -> int:
         return int(env_val)
     return _DEFAULT_N_PARTIES
 
-# ---------------------------------------------------------------------------
-# Analytical bandwidth model
-# ---------------------------------------------------------------------------
+
+def _require_cuda() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for SMPC wall-clock benchmarks.")
 
 
 @dataclass
 class CommCost:
-    """Single (workflow, mode, config) bandwidth record.
-
-    ``n_clients`` (``C``) is the number of federated data-holding clients;
-    ``n_parties`` (``P``) is the number of SMPC computational parties.
-    The two are *independent*: plaintext federation costs scale with ``C``,
-    while the additive-sharing share factor is ``(P-1)`` regardless of
-    ``C``. Bytes counts are *per workflow*, summing all rounds; ``rounds``
-    is the number of communication rounds.
-    """
-
     workflow: str
     mode: str
     n_clients: int
@@ -119,34 +83,6 @@ def ft_weight_sharing_bytes(
     n_rounds: int,
     smpc: bool,
 ) -> CommCost:
-    """Bandwidth for one fine-tuning experiment.
-
-    Plaintext FedAvg/FedProx (matches ``cliftiGPT/federated/aggregator.py``
-    ``aggregate_plain``):
-
-      - Per client per round: upload ``4 * theta`` bytes (state_dict);
-        download ``4 * theta`` bytes (global state_dict broadcast).
-      - The number of SMPC parties ``P`` does not enter the plaintext
-        path; per-client bytes are independent of both ``C`` and ``P``.
-
-    SMPC FedAvg (matches ``aggregate_smpc`` together with the
-    ``client.get_local_updates`` SMPC branch in
-    ``cliftiGPT/federated/client.py``):
-
-      - Each client converts every parameter tensor via
-        ``crypten.cryptensor(...)``. CrypTen's additive-sharing protocol
-        with ``P`` parties sends one share of size ``4 * theta`` to every
-        other party (a "secret-shared upload"). With ``P`` parties the
-        per-client upload becomes ``(P - 1) * 4 * theta`` bytes,
-        independent of the number of federated clients ``C``.
-      - The aggregator reveals the encrypted global weights via
-        ``get_plain_text``. The repo (``FedAnnotator.local_update``,
-        ``annotator.py:139-147``) broadcasts the *plaintext* global
-        weights back to clients, so each client receives the
-        ``4 * theta`` plaintext download.
-      - Federation totals still scale with ``C`` because each of the
-        ``C`` clients emits its own share set.
-    """
     _check_pos("theta", theta)
     _check_pos("n_clients", n_clients)
     _check_pos("n_parties", n_parties)
@@ -193,34 +129,6 @@ def knn_reference_mapping_bytes(
     n_classes: int,
     smpc: bool,
 ) -> CommCost:
-    """Bandwidth for a single federated reference-mapping pass.
-
-    Reference cells are assumed evenly distributed across clients
-    (``n_ref_local = n_ref_total / n_clients``). ``n_parties`` is the
-    SMPC computational party count and is independent of ``n_clients``;
-    the additive-sharing share factor ``(P-1)`` multiplies every SMPC
-    secret-shared tensor.
-
-      - Plaintext (``federated_reference_map`` non-SMPC branch): each
-        client sends ``(n_query, k)`` float32 distances plus
-        ``(n_query, k)`` SHA-256 hex hashes
-        (``embedder.compute_local_distances`` → ``hash_indices``).
-        Coordinator broadcasts the global top-k hashes back per
-        ``global_aggregate_distances``.
-
-      - SMPC: query embeddings encrypted at the coordinator (one share
-        per other party); each client encrypts its local reference
-        matrix and global-index offset (``(P-1)`` shares each), runs
-        ``top_k_encrypted_distances`` (k iterations of ``min`` +
-        ``suppress_argmin`` over the full ``(n_query, n_ref_local)``
-        matrix), and ships ``(n_query, k)`` encrypted distances +
-        encrypted global indices to the coordinator. The
-        Beaver-triple online traffic for the masked-min loop in
-        ``top_k_ind_selection`` scales as
-        ``(P-1) * 2 * 4 * n_query * n_ref_local * k`` bytes per client.
-
-    Bandwidth is computed for a **single pass** (no rounds).
-    """
     _check_pos("n_query", n_query)
     _check_pos("n_ref_total", n_ref_total)
     _check_pos("n_clients", n_clients)
@@ -293,17 +201,6 @@ def binning_bytes(
     n_bins: int = 51,
     hist_grid_resolution: int = 4096,
 ) -> CommCost:
-    """Bandwidth for the one-shot federated binning aggregation.
-
-    Plain modes (``fed-weight-avg`` / ``fed-hist``) send per-client
-    summary statistics in clear. SMPC modes secret-share the same
-    statistics; CrypTen sharing multiplies the per-client byte count by
-    ``(P - 1)`` where ``P`` is the SMPC party count (independent of
-    ``C``). Federation totals still scale with ``C``.
-
-    See ``cliftiGPT/preprocessor/aggregation.py`` for the exact tensor
-    shapes that the protocol consumes.
-    """
     _check_pos("n_clients", n_clients)
     _check_pos("n_parties", n_parties)
     _check_pos("n_bins", n_bins)
@@ -356,17 +253,7 @@ def binning_bytes(
     )
 
 
-# ---------------------------------------------------------------------------
-# Wall-clock benchmark utilities
-# ---------------------------------------------------------------------------
-
-
 def _median_seconds(fn, n_reps: int) -> float:
-    """Return median wall-clock seconds of ``n_reps`` calls to ``fn``.
-
-    A warm-up call is performed first and excluded so CrypTen lazy-init
-    or PyTorch kernel-compile costs do not skew the timing.
-    """
     fn()  # warm-up
     samples: List[float] = []
     for _ in range(n_reps):
@@ -382,31 +269,9 @@ def _median_smpc_seconds(
     *args,
     **kwargs,
 ) -> float:
-    """Time an SMPC kernel under CrypTen with world size ``n_parties``.
-
-    CPU SMPC runs ``run_multiprocess`` in-process. GPU SMPC re-execs this
-    script in a clean subprocess so CrypTen can fork before CUDA is used in
-    the fork parent (CrypTen + fork + inherited CUDA contexts is unsafe).
-    """
     if n_parties < 2:
         return float(worker(*args, **kwargs))
-
-    device_name = str(args[-1]) if args else "cpu"
-    if _smpc_use_cuda(device_name):
-        return _run_smpc_isolated_subprocess(n_parties, worker, args)
-
-    from crypten.mpc import run_multiprocess
-
-    @run_multiprocess(n_parties)
-    def _launch():
-        return worker(*args, **kwargs)
-
-    results = _launch()
-    if results is None:
-        raise RuntimeError(
-            f"CrypTen multiprocess benchmark failed for P={n_parties}."
-        )
-    return float(results[0])
+    return _run_smpc_isolated_subprocess(n_parties, worker, args)
 
 
 def _run_smpc_isolated_subprocess(
@@ -414,9 +279,9 @@ def _run_smpc_isolated_subprocess(
     worker,
     args: tuple,
 ) -> float:
-    """Run one SMPC timing in a fresh Python process (GPU-safe)."""
     env = os.environ.copy()
     env["COMM_COST_ISOLATED_SMPC"] = "1"
+    env.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     if not env.get("CUDA_VISIBLE_DEVICES", "").strip():
         env["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -454,7 +319,6 @@ def _run_smpc_isolated_subprocess(
 
 
 def _smpc_isolated_main() -> None:
-    """Entry point for COMM_COST_ISOLATED_SMPC=1 child processes."""
     payload_path = os.environ.get("COMM_COST_SMPC_PAYLOAD")
     if not payload_path:
         sys.exit("COMM_COST_SMPC_PAYLOAD missing")
@@ -478,42 +342,31 @@ def _smpc_isolated_main() -> None:
     sys.exit(0)
 
 
-def _smpc_use_cuda(device_name: str) -> bool:
-    return device_name == "cuda" or (
-        device_name == "auto" and _cuda_available_lightweight()
-    )
+def _benchmark_smpc_seed(seed: int) -> None:
+    import random
+
+    import crypten
+    import torch
+    from crypten.config import cfg
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    cfg.encoder.precision_bits = 32
+    cfg.debug.debug_mode = True
+    crypten.manual_seed(seed, seed, seed)
 
 
-def _cuda_available_lightweight() -> bool:
-    try:
-        import torch
+def _init_smpc_worker(seed: int, n_parties: int) -> "torch.device":
+    import torch
 
-        return torch.cuda.is_available()
-    except Exception:
-        return False
-
-
-def _party_gpu_ids(n_parties: int) -> List[int]:
-    """Physical GPU indices for CrypTen parties (used in docs / logging only)."""
-    raw = os.environ.get(COMM_COST_GPU_IDS_ENV, "").strip()
-    if raw:
-        ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-        if ids:
-            return ids
-    return list(range(n_parties))
-
-
-def _warn_cuda_multiprocess(smpc_use_cuda: bool) -> None:
-    """Log GPU env recommendations."""
-    if not smpc_use_cuda:
-        return
-
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if not visible or "," in visible:
-        _log(
-            "GPU SMPC runs in an isolated subprocess. Recommended: "
-            "export CUDA_VISIBLE_DEVICES=0"
-        )
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    _benchmark_smpc_seed(seed)
+    _assert_crypten_world_size(n_parties)
+    return device
 
 
 def _assert_crypten_world_size(n_parties: int) -> None:
@@ -524,40 +377,6 @@ def _assert_crypten_world_size(n_parties: int) -> None:
         raise RuntimeError(
             f"CrypTen world_size={actual}, expected {n_parties}"
         )
-
-
-def resolve_device(device_arg: Optional[str] = None) -> "torch.device":
-    """Resolve wall-clock device: auto → cuda when available, else cpu."""
-    import torch
-
-    choice = (device_arg or "auto").lower()
-    if choice == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(choice)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            f"--device {device_arg} requested but torch.cuda.is_available() is False"
-        )
-    return device
-
-
-def _init_smpc_worker(
-    device_name: str, seed: int, n_parties: int
-) -> "torch.device":
-    """Select party-local device, seed RNGs, and verify CrypTen world size."""
-    import torch
-
-    from cliftiGPT.utils import set_seed
-
-    requested = torch.device(device_name)
-    if requested.type == "cuda":
-        device = torch.device("cuda:0")
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-    set_seed(seed)
-    _assert_crypten_world_size(n_parties)
-    return device
 
 
 def _tensor_on(data: Any, device: "torch.device", dtype: Any = None) -> "torch.Tensor":
@@ -574,11 +393,6 @@ def _make_state_dict(
     device: Optional["torch.device"] = None,
     n_layers: int = 4,
 ) -> Dict[str, "torch.Tensor"]:
-    """Build a plain state_dict whose total parameter count is ``theta``.
-
-    Used only to feed ``FedAvg.aggregate_plain`` / ``aggregate_smpc`` with
-    realistic shapes without instantiating the full scGPT model.
-    """
     import torch
 
     if device is None:
@@ -612,14 +426,12 @@ def _time_ft_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
-    device_name: str,
 ) -> float:
-    """Run fine-tuning SMPC aggregation inside a CrypTen process group."""
     import crypten
 
     from cliftiGPT.federated.aggregator import FedAvg
 
-    device = _init_smpc_worker(device_name, seed, n_parties)
+    device = _init_smpc_worker(seed, n_parties)
 
     state = _make_state_dict(theta, device)
     agg_smpc = FedAvg(
@@ -640,33 +452,18 @@ def _time_ft_smpc_worker(
     )
 
 
-# ---------------------------------------------------------------------------
-# Fine-tuning wall-clock benchmark
-# ---------------------------------------------------------------------------
-
-
 def benchmark_fine_tuning(
     theta_values: List[int],
     n_clients_values: List[int],
     n_parties: int,
     n_rounds: int,
     n_reps: int,
-    device_name: str,
 ) -> List[Dict[str, Any]]:
-    """Time ``FedAvg.aggregate_plain`` and ``aggregate_smpc``.
-
-    Plaintext aggregation runs in the parent process. SMPC aggregation is
-    timed under CrypTen with ``n_parties`` processes via
-    ``crypten.mpc.run_multiprocess``.
-    """
-
     import torch
 
     from cliftiGPT.federated.aggregator import FedAvg
 
-    _ = torch  # silence linter; torch is used via state-dict tensors below
-
-    smpc_use_cuda = _smpc_use_cuda(device_name)
+    _ = torch
     plain_device = torch.device("cpu")
 
     rows: List[Dict[str, Any]] = []
@@ -700,14 +497,8 @@ def benchmark_fine_tuning(
 
             _log(
                 f"[FT]   plaintext median={t_plain*1e3:.1f}ms — "
-                f"starting SMPC on {device_name} (spawns {n_parties} CrypTen "
-                f"processes)..."
+                f"starting GPU SMPC ({n_parties} parties)..."
             )
-            if smpc_use_cuda and not os.environ.get("CUDA_VISIBLE_DEVICES", "").strip():
-                _log(
-                    "  Hint: export CUDA_VISIBLE_DEVICES=0 (GPU SMPC uses an "
-                    "isolated subprocess; one shared GPU is safest)."
-                )
             t_smpc = _median_smpc_seconds(
                 n_parties,
                 _time_ft_smpc_worker,
@@ -716,7 +507,6 @@ def benchmark_fine_tuning(
                 n_parties,
                 n_reps,
                 42,
-                device_name,
             )
 
             cost_plain = ft_weight_sharing_bytes(
@@ -770,20 +560,9 @@ def benchmark_fine_tuning(
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Reference-mapping (KNN) wall-clock benchmark
-# ---------------------------------------------------------------------------
-
-
 def _plain_knn(
     query: np.ndarray, references: List[np.ndarray], k: int
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Reproduce the plaintext KNN path of ``ClientEmbedder``.
-
-    Mirrors ``compute_local_distances`` (FAISS branch) + the coordinator
-    concatenation in ``global_aggregate_distances`` non-SMPC branch, but
-    without the hash bookkeeping; we only need the timing.
-    """
     import faiss
 
     n_q = query.shape[0]
@@ -810,12 +589,6 @@ def _smpc_knn(
     references,
     k: int,
 ):
-    """Reproduce the SMPC KNN path of ``ClientEmbedder.compute_squared_distances``
-    plus the global ``secure_top_k_distance_agg`` step.
-
-    Returns the encrypted global top-k distances; the caller can decide to
-    reveal them outside the timed region.
-    """
     import crypten
 
     from cliftiGPT.utils import (
@@ -847,12 +620,10 @@ def _time_knn_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
-    device_name: str,
 ) -> float:
-    """Run federated KNN SMPC inside a CrypTen process group."""
     import crypten
 
-    device = _init_smpc_worker(device_name, seed, n_parties)
+    device = _init_smpc_worker(seed, n_parties)
 
     rng = np.random.default_rng(seed)
     query = rng.standard_normal((n_query, d_embed)).astype(np.float32)
@@ -877,14 +648,7 @@ def benchmark_reference_mapping(
     k_values: List[int],
     n_classes: int,
     n_reps: int,
-    device_name: str,
 ) -> List[Dict[str, Any]]:
-    """Time plaintext FAISS KNN vs the CrypTen SMPC distance + top-k pipeline.
-
-    SMPC timings use ``crypten.mpc.run_multiprocess(n_parties)`` so wall-clock
-    matches the analytical party count.
-    """
-
     rng = np.random.default_rng(42)
 
     rows: List[Dict[str, Any]] = []
@@ -914,8 +678,7 @@ def benchmark_reference_mapping(
                     )
                     _log(
                         f"[KNN] {payload} C={n_clients} P={n_parties}: "
-                        f"plaintext={t_plain*1e3:.1f}ms — starting SMPC on "
-                        f"{device_name}..."
+                        f"plaintext={t_plain*1e3:.1f}ms — starting GPU SMPC..."
                     )
 
                     t_smpc = _median_smpc_seconds(
@@ -929,7 +692,6 @@ def benchmark_reference_mapping(
                         n_parties,
                         n_reps,
                         42,
-                        device_name,
                     )
 
                     cost_plain = knn_reference_mapping_bytes(
@@ -996,11 +758,6 @@ def benchmark_reference_mapping(
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Binning wall-clock benchmark
-# ---------------------------------------------------------------------------
-
-
 def _time_binning_weighted_smpc_worker(
     n_clients: int,
     n_samples_per_client: int,
@@ -1008,9 +765,7 @@ def _time_binning_weighted_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
-    device_name: str,
 ) -> float:
-    """Time fed-weight-avg SMPC aggregation inside a CrypTen process group."""
     import crypten
 
     from cliftiGPT.preprocessor.aggregation import (
@@ -1019,7 +774,7 @@ def _time_binning_weighted_smpc_worker(
         reveal_nonzero_total,
     )
 
-    device = _init_smpc_worker(device_name, seed, n_parties)
+    device = _init_smpc_worker(seed, n_parties)
 
     rng = np.random.default_rng(seed)
     per_client_nonzero = [
@@ -1056,9 +811,7 @@ def _time_binning_hist_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
-    device_name: str,
 ) -> float:
-    """Time fed-hist SMPC aggregation inside a CrypTen process group."""
     import crypten
 
     from cliftiGPT.preprocessor.aggregation import (
@@ -1067,7 +820,7 @@ def _time_binning_hist_smpc_worker(
         secure_reveal_envelope_max,
     )
 
-    device = _init_smpc_worker(device_name, seed, n_parties)
+    device = _init_smpc_worker(seed, n_parties)
 
     rng = np.random.default_rng(seed)
     per_client_nonzero = [
@@ -1109,13 +862,7 @@ def benchmark_binning(
     hist_grid_resolution: int,
     n_samples_per_client: int,
     n_reps: int,
-    device_name: str,
 ) -> List[Dict[str, Any]]:
-    """Time fed-weight-avg / fed-hist plain and SMPC aggregation paths.
-
-    SMPC timings use ``crypten.mpc.run_multiprocess(n_parties)``.
-    """
-
     from cliftiGPT.preprocessor.aggregation import (
         aggregate_bin_edges,
         aggregate_global_max_expr,
@@ -1157,7 +904,6 @@ def benchmark_binning(
             n_parties,
             n_reps,
             42,
-            device_name,
         )
 
         max_expr = aggregate_global_max_expr(client_max_list)
@@ -1189,7 +935,6 @@ def benchmark_binning(
             n_parties,
             n_reps,
             42,
-            device_name,
         )
 
         for strategy, t_val in [
@@ -1237,11 +982,6 @@ def benchmark_binning(
     return rows
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
 def _parse_int_list(s: str) -> List[int]:
     return [int(x) for x in s.split(",") if x.strip()]
 
@@ -1276,11 +1016,11 @@ def parse_args():
         ),
     )
     p.add_argument(
-        "--ft_thetas", type=str, default="1_000_000,10_000_000,50_000_000",
+        "--ft_thetas", type=str, default="1_000_000,10_000_000",
         help="Comma-separated parameter counts for fine-tuning benchmark.",
     )
     p.add_argument(
-        "--ft_clients", type=str, default="2,3,5,10",
+        "--ft_clients", type=str, default="2,3,5",
         help="Comma-separated federated client counts C for fine-tuning.",
     )
     p.add_argument(
@@ -1316,23 +1056,9 @@ def parse_args():
         help="Synthetic non-zero values per client for the binning benchmark.",
     )
     p.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cpu", "cuda"],
-        help=(
-            "PyTorch device for wall-clock benchmarks. auto=cuda when available. "
-            "Under cuda, CrypTen party rank r uses cuda:r %% num_gpus."
-        ),
-    )
-    p.add_argument(
         "--quick",
         action="store_true",
-        help=(
-            "Minimal sweep for smoke testing: small |θ|, one client count "
-            "per workflow, n_reps=1. Analytical bytes still use full formulas; "
-            "wall-clock is only indicative."
-        ),
+        help="Minimal smoke-test sweep (small configs, n_reps=1).",
     )
     return p.parse_args()
 
@@ -1358,8 +1084,7 @@ def main() -> None:
     if args.quick:
         _apply_quick_preset(args)
     args.n_parties = resolve_n_parties(args.n_parties)
-    device = resolve_device(args.device)
-    device_name = str(device)
+    _require_cuda()
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
@@ -1375,24 +1100,14 @@ def main() -> None:
             f"--n_parties must be >= 2 for additive sharing; got {args.n_parties}"
         )
 
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(unset → 0 in child)")
     _log(
-        f"Communication-cost benchmark — P={args.n_parties}, "
-        f"device={device_name}, workflows={sorted(workflows)}, "
-        f"n_reps={args.n_reps}, output={output_dir.resolve()}"
+        f"Communication-cost benchmark — P={args.n_parties}, GPU, "
+        f"workflows={sorted(workflows)}, n_reps={args.n_reps}, "
+        f"CUDA_VISIBLE_DEVICES={visible}, output={output_dir.resolve()}"
     )
-    if _smpc_use_cuda(device_name):
-        _warn_cuda_multiprocess(True)
-        gpu_ids = _party_gpu_ids(args.n_parties)
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(unset → 0 in child)")
-        _log(
-            f"CUDA SMPC: isolated subprocess per timing; "
-            f"recommended export CUDA_VISIBLE_DEVICES=0. "
-            f"Optional {COMM_COST_GPU_IDS_ENV}="
-            f"{','.join(str(i) for i in gpu_ids)}. "
-            f"Current CUDA_VISIBLE_DEVICES={visible}"
-        )
     if args.quick:
-        _log("(--quick preset: small configs; full sweep omit --quick)")
+        _log("(--quick preset)")
 
     all_rows: List[Dict[str, Any]] = []
 
@@ -1404,7 +1119,6 @@ def main() -> None:
                 n_parties=args.n_parties,
                 n_rounds=args.ft_rounds,
                 n_reps=args.n_reps,
-                device_name=device_name,
             )
         )
 
@@ -1419,7 +1133,6 @@ def main() -> None:
                 k_values=_parse_int_list(args.knn_k),
                 n_classes=args.knn_n_classes,
                 n_reps=args.n_reps,
-                device_name=device_name,
             )
         )
 
@@ -1432,7 +1145,6 @@ def main() -> None:
                 hist_grid_resolution=args.binning_grid_resolution,
                 n_samples_per_client=args.binning_n_samples_per_client,
                 n_reps=args.n_reps,
-                device_name=device_name,
             )
         )
 
@@ -1451,20 +1163,7 @@ def main() -> None:
     metadata = {
         "args": vars(args),
         "n_parties": args.n_parties,
-        "caveats": [
-            f"Analytical bandwidth uses a fixed SMPC party count "
-            f"P={args.n_parties}; share factor is (P-1). The number of "
-            "federated clients C is independent and sweeps per workflow.",
-            f"SMPC wall-clock timings are measured under CrypTen "
-            f"run_multiprocess(P={args.n_parties}); each timed kernel "
-            "spawns P synchronized processes on a single host.",
-            "CrypTen wall-clock includes encryption/decryption and "
-            "protocol cost but excludes real inter-site network latency.",
-            "Bandwidth is derived analytically from CrypTen's additive-"
-            "sharing convention (one share per other party).",
-            "Beaver-triple precomputation is assumed offline (CrypTen "
-            "default) and not included in the SMPC wall-clock.",
-        ],
+        "device": SMPC_DEVICE,
     }
     (output_dir / "comm_cost_metadata.json").write_text(
         json.dumps(metadata, indent=2)

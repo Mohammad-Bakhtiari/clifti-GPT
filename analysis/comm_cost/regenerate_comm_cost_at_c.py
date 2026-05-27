@@ -1,17 +1,5 @@
 #!/usr/bin/env python
-"""Rebuild ``comm_cost_results.csv`` for a fixed party count P without CrypTen.
-
-Sweeps a list of federated client counts ``C`` while holding the SMPC
-computational party count ``P`` fixed (default ``P=3``). Analytical byte
-counts are recomputed exactly. Wall-clock values are taken from
-``--timing_csv`` when an exact ``(workflow, mode, payload, n_clients)``
-match exists; otherwise KNN/binning timings are log-linearly
-interpolated between the nearest bracketing client counts in the prior
-CSV.
-
-Re-run ``analysis/comm_cost/comm_cost.py`` (with CrypTen) to replace interpolated
-timings with fresh measurements.
-"""
+"""Recompute comm_cost_results.csv bytes for a fixed P (no GPU benchmark)."""
 
 from __future__ import annotations
 
@@ -36,7 +24,7 @@ from analysis.comm_cost.comm_cost import (  # noqa: E402
     COMM_COST_N_PARTIES_ENV,
     _DEFAULT_N_PARTIES,
 )
-from analysis.comm_cost.paths import COMM_COST_OUTPUT_DIR  # noqa: E402
+from analysis.comm_cost import COMM_COST_OUTPUT_DIR  # noqa: E402
 
 
 def _parse_int_list(s: str) -> List[int]:
@@ -262,7 +250,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--ft_clients",
         type=str,
-        default="2,3,5,10",
+        default="2,3,5",
         help="Federated client counts C swept for the fine-tuning workflow.",
     )
     p.add_argument(
@@ -289,7 +277,7 @@ def parse_args() -> argparse.Namespace:
         help="Prior results used to copy/interpolate wall-clock timings.",
     )
     p.add_argument("--backup", action="store_true", help="Copy prior CSV to *.bak")
-    p.add_argument("--ft_thetas", type=str, default="1_000_000,10_000_000,50_000_000")
+    p.add_argument("--ft_thetas", type=str, default="1_000_000,10_000_000")
     p.add_argument("--ft_rounds", type=int, default=5)
     p.add_argument("--knn_n_query", type=str, default="500,2000")
     p.add_argument("--knn_n_ref", type=str, default="1000,5000")

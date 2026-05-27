@@ -1,19 +1,5 @@
 #!/usr/bin/env python
-"""Plot communication-cost benchmark figures from analysis/comm_cost/comm_cost.py.
-
-Reads ``comm_cost_results.csv`` and writes PNG figures only. For LaTeX
-tables and macros, run ``analysis/comm_cost/render_comm_cost_tex.py`` before
-``pdflatex``.
-
-Figures (default directory ``output/comm_cost/``):
-    comm_cost_legend.png         — shared horizontal Plaintext/SMPC legend
-    comm_cost_scaling_ft.png     — fine-tuning bytes vs |θ| (single C) or vs C
-                                    (single |θ|); SMPC bytes are independent of C
-                                    because the share factor is (P-1) with P fixed.
-    comm_cost_scaling_knn.png    — KNN bytes vs total reference size
-    comm_cost_scaling.png        — legacy two-panel composite (FT + KNN)
-    comm_cost_wallclock.png      — measured median t (s) per workflow
-"""
+"""Plot communication-cost figures from comm_cost_results.csv."""
 
 import argparse
 import sys
