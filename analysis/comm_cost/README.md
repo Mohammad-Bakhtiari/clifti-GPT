@@ -64,9 +64,9 @@ child. Each worker asserts `comm.get().get_world_size() == P`.
 
 CrypTen and PyTorch are required for the wall-clock benchmark.
 
-**GPU SMPC (CrypTen multiprocess):** export a **single** visible GPU before
-running; all P parties share it. This avoids CUDA init errors in worker
-processes:
+**GPU SMPC (CrypTen multiprocess):** each SMPC timing re-execs this script in a
+clean subprocess (CrypTen forks internally and cannot inherit a CUDA context
+from the main benchmark process). Export **one** GPU before the top-level run:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -74,8 +74,8 @@ export COMM_COST_N_PARTIES=3
 python analysis/comm_cost/comm_cost.py --device cuda
 ```
 
-Use `--device cpu` (no export needed) if GPU SMPC still fails. Plaintext
-fine-tuning and KNN (FAISS) always run on CPU; only SMPC wall-clock uses GPU.
+Use `--device cpu` if GPU SMPC still fails. Plaintext fine-tuning and KNN
+(FAISS) always run on CPU; only SMPC wall-clock uses GPU.
 
 From the repository root:
 

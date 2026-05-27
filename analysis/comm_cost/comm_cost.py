@@ -29,7 +29,10 @@ import csv
 import json
 import math
 import os
+import pickle
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -381,15 +384,16 @@ def _median_smpc_seconds(
 ) -> float:
     """Time an SMPC kernel under CrypTen with world size ``n_parties``.
 
-    For ``n_parties >= 2`` this uses ``crypten.mpc.run_multiprocess`` so
-    each timed call runs with the requested party count. The parent process
-    must not call ``crypten.init()`` or create CUDA tensors beforehand.
+    CPU SMPC runs ``run_multiprocess`` in-process. GPU SMPC re-execs this
+    script in a clean subprocess so CrypTen can fork before CUDA is used in
+    the fork parent (CrypTen + fork + inherited CUDA contexts is unsafe).
     """
     if n_parties < 2:
         return float(worker(*args, **kwargs))
 
     device_name = str(args[-1]) if args else "cpu"
-    _warn_cuda_multiprocess(_smpc_use_cuda(device_name))
+    if _smpc_use_cuda(device_name):
+        return _run_smpc_isolated_subprocess(n_parties, worker, args)
 
     from crypten.mpc import run_multiprocess
 
@@ -400,11 +404,78 @@ def _median_smpc_seconds(
     results = _launch()
     if results is None:
         raise RuntimeError(
-            f"CrypTen multiprocess benchmark failed for P={n_parties}. "
-            "For GPU SMPC, export CUDA_VISIBLE_DEVICES=0 (one GPU shared by "
-            "all parties) or use --device cpu."
+            f"CrypTen multiprocess benchmark failed for P={n_parties}."
         )
     return float(results[0])
+
+
+def _run_smpc_isolated_subprocess(
+    n_parties: int,
+    worker,
+    args: tuple,
+) -> float:
+    """Run one SMPC timing in a fresh Python process (GPU-safe)."""
+    env = os.environ.copy()
+    env["COMM_COST_ISOLATED_SMPC"] = "1"
+    if not env.get("CUDA_VISIBLE_DEVICES", "").strip():
+        env["CUDA_VISIBLE_DEVICES"] = "0"
+
+    fd, payload_path = tempfile.mkstemp(suffix=".pkl", prefix="comm_cost_smpc_")
+    os.close(fd)
+    try:
+        with open(payload_path, "wb") as f:
+            pickle.dump(
+                {"n_parties": n_parties, "worker": worker, "args": args}, f
+            )
+        env["COMM_COST_SMPC_PAYLOAD"] = payload_path
+        script = str(Path(__file__).resolve())
+        proc = subprocess.run(
+            [sys.executable, script],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(
+                "Isolated GPU SMPC subprocess failed "
+                f"(exit {proc.returncode}). {err[-2000:]}"
+            )
+        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise RuntimeError("Isolated GPU SMPC subprocess produced no output")
+        return float(lines[-1])
+    finally:
+        try:
+            os.unlink(payload_path)
+        except OSError:
+            pass
+
+
+def _smpc_isolated_main() -> None:
+    """Entry point for COMM_COST_ISOLATED_SMPC=1 child processes."""
+    payload_path = os.environ.get("COMM_COST_SMPC_PAYLOAD")
+    if not payload_path:
+        sys.exit("COMM_COST_SMPC_PAYLOAD missing")
+    with open(payload_path, "rb") as f:
+        payload = pickle.load(f)
+
+    n_parties = int(payload["n_parties"])
+    worker = payload["worker"]
+    args = tuple(payload["args"])
+
+    from crypten.mpc import run_multiprocess
+
+    @run_multiprocess(n_parties)
+    def _launch():
+        return worker(*args)
+
+    results = _launch()
+    if results is None:
+        sys.exit(1)
+    print(float(results[0]), flush=True)
+    sys.exit(0)
 
 
 def _smpc_use_cuda(device_name: str) -> bool:
@@ -433,15 +504,15 @@ def _party_gpu_ids(n_parties: int) -> List[int]:
 
 
 def _warn_cuda_multiprocess(smpc_use_cuda: bool) -> None:
-    """Log GPU env requirements; CrypTen uses fork, so parent must stay off CUDA."""
+    """Log GPU env recommendations."""
     if not smpc_use_cuda:
         return
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     if not visible or "," in visible:
         _log(
-            "GPU SMPC: export CUDA_VISIBLE_DEVICES=0 before starting Python "
-            "(one GPU shared by all parties). Do not set multiple GPUs."
+            "GPU SMPC runs in an isolated subprocess. Recommended: "
+            "export CUDA_VISIBLE_DEVICES=0"
         )
 
 
@@ -634,8 +705,8 @@ def benchmark_fine_tuning(
             )
             if smpc_use_cuda and not os.environ.get("CUDA_VISIBLE_DEVICES", "").strip():
                 _log(
-                    "  Hint: export CUDA_VISIBLE_DEVICES=0 before running GPU SMPC "
-                    "(all parties share one GPU; avoids CrypTen init errors)."
+                    "  Hint: export CUDA_VISIBLE_DEVICES=0 (GPU SMPC uses an "
+                    "isolated subprocess; one shared GPU is safest)."
                 )
             t_smpc = _median_smpc_seconds(
                 n_parties,
@@ -1309,12 +1380,14 @@ def main() -> None:
         f"device={device_name}, workflows={sorted(workflows)}, "
         f"n_reps={args.n_reps}, output={output_dir.resolve()}"
     )
-    if device.type == "cuda":
+    if _smpc_use_cuda(device_name):
+        _warn_cuda_multiprocess(True)
         gpu_ids = _party_gpu_ids(args.n_parties)
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(all)")
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(unset → 0 in child)")
         _log(
-            f"CUDA SMPC: recommended export CUDA_VISIBLE_DEVICES=0 "
-            f"(parties share one GPU). Optional {COMM_COST_GPU_IDS_ENV}="
+            f"CUDA SMPC: isolated subprocess per timing; "
+            f"recommended export CUDA_VISIBLE_DEVICES=0. "
+            f"Optional {COMM_COST_GPU_IDS_ENV}="
             f"{','.join(str(i) for i in gpu_ids)}. "
             f"Current CUDA_VISIBLE_DEVICES={visible}"
         )
@@ -1402,4 +1475,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if os.environ.get("COMM_COST_ISOLATED_SMPC") == "1":
+        _smpc_isolated_main()
+    else:
+        main()
