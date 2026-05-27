@@ -62,8 +62,10 @@ child. Each worker asserts `comm.get().get_world_size() == P`.
 
 ## Running the full pipeline
 
-CrypTen and a CUDA-capable PyTorch are required for the wall-clock
-benchmark. From the repository root:
+CrypTen and PyTorch are required for the wall-clock benchmark. With
+`--device auto` (default), SMPC uses CUDA when available; party rank `r`
+maps to `cuda:r % num_gpus` (e.g. P=3 on 4× T4 uses GPUs 0–2). Plaintext
+KNN stays on CPU (FAISS). From the repository root:
 
 ```bash
 export COMM_COST_N_PARTIES=3
@@ -74,13 +76,12 @@ python analysis/comm_cost/render_comm_cost_tex.py
 ```
 
 **Runtime:** The default sweep times SMPC on up to 50M parameters with
-`n_reps=5` and `P=3` CrypTen processes. On CPU this can take many hours
-before the first `[FT]` line appears, because progress is only printed
-after each SMPC block finishes. Use `--quick` to verify the pipeline in
-minutes:
+`n_reps=5` and `P=3` CrypTen processes. On CPU this can take many hours;
+use `--device cuda` on GPU nodes (default `auto` picks CUDA when available).
+Use `--quick` to verify the pipeline in minutes:
 
 ```bash
-python analysis/comm_cost/comm_cost.py --quick
+python analysis/comm_cost/comm_cost.py --quick --device cuda
 ```
 
 Analytical byte counts in the CSV do not depend on wall-clock; you can
