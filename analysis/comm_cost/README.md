@@ -62,15 +62,28 @@ child. Each worker asserts `comm.get().get_world_size() == P`.
 
 ## Running the full pipeline
 
-CrypTen and PyTorch are required for the wall-clock benchmark. With
-`--device auto` (default), SMPC uses CUDA when available; party rank `r`
-maps to `cuda:r % num_gpus` (e.g. P=3 on 4× T4 uses GPUs 0–2). Plaintext
-KNN stays on CPU (FAISS). From the repository root:
+CrypTen and PyTorch are required for the wall-clock benchmark.
+
+**GPU SMPC (CrypTen multiprocess):** export a **single** visible GPU before
+running; all P parties share it. This avoids CUDA init errors in worker
+processes:
 
 ```bash
+export CUDA_VISIBLE_DEVICES=0
+export COMM_COST_N_PARTIES=3
+python analysis/comm_cost/comm_cost.py --device cuda
+```
+
+Use `--device cpu` (no export needed) if GPU SMPC still fails. Plaintext
+fine-tuning and KNN (FAISS) always run on CPU; only SMPC wall-clock uses GPU.
+
+From the repository root:
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
 export COMM_COST_N_PARTIES=3
 
-python analysis/comm_cost/comm_cost.py
+python analysis/comm_cost/comm_cost.py --device cuda
 python analysis/comm_cost/plot_comm_cost.py
 python analysis/comm_cost/render_comm_cost_tex.py
 ```
@@ -81,6 +94,7 @@ use `--device cuda` on GPU nodes (default `auto` picks CUDA when available).
 Use `--quick` to verify the pipeline in minutes:
 
 ```bash
+export CUDA_VISIBLE_DEVICES=0
 python analysis/comm_cost/comm_cost.py --quick --device cuda
 ```
 

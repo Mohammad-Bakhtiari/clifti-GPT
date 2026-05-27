@@ -28,6 +28,7 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing as mp
 import os
 import sys
 import time
@@ -53,6 +54,7 @@ SHA256_HEX_BYTES = 64
 
 # Env var read by ``resolve_n_parties()`` when ``--n_parties`` is omitted.
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
+COMM_COST_GPU_IDS_ENV = "COMM_COST_GPU_IDS"
 _DEFAULT_N_PARTIES = 3
 
 
@@ -382,11 +384,13 @@ def _median_smpc_seconds(
 
     For ``n_parties >= 2`` this uses ``crypten.mpc.run_multiprocess`` so
     each timed call runs with the requested party count. The parent process
-    must not call ``crypten.init()`` beforehand (that would pin
-    ``WORLD_SIZE=1``).
+    must not call ``crypten.init()`` or create CUDA tensors beforehand.
     """
     if n_parties < 2:
         return float(worker(*args, **kwargs))
+
+    device_name = str(args[-1]) if args else "cpu"
+    _configure_crypten_multiprocess(_smpc_use_cuda(device_name), n_parties)
 
     from crypten.mpc import run_multiprocess
 
@@ -397,9 +401,58 @@ def _median_smpc_seconds(
     results = _launch()
     if results is None:
         raise RuntimeError(
-            f"CrypTen multiprocess benchmark failed for P={n_parties}"
+            f"CrypTen multiprocess benchmark failed for P={n_parties}. "
+            "For GPU SMPC, export CUDA_VISIBLE_DEVICES=0 (one GPU shared by "
+            "all parties) or use --device cpu."
         )
     return float(results[0])
+
+
+def _smpc_use_cuda(device_name: str) -> bool:
+    return device_name == "cuda" or (
+        device_name == "auto" and _cuda_available_lightweight()
+    )
+
+
+def _cuda_available_lightweight() -> bool:
+    try:
+        import torch
+
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _party_gpu_ids(n_parties: int) -> List[int]:
+    """Physical GPU indices for CrypTen parties (used in docs / logging only)."""
+    raw = os.environ.get(COMM_COST_GPU_IDS_ENV, "").strip()
+    if raw:
+        ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+        if ids:
+            return ids
+    return list(range(n_parties))
+
+
+def _configure_crypten_multiprocess(smpc_use_cuda: bool, n_parties: int) -> None:
+    """Use spawn (not fork) so CUDA is not inherited from the parent."""
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
+    if not smpc_use_cuda:
+        return
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible and "," not in visible:
+        return
+
+    if visible and "," in visible:
+        _log(
+            "Note: CUDA_VISIBLE_DEVICES lists multiple GPUs. CrypTen "
+            "multiprocess is most reliable with a single visible GPU, e.g. "
+            "export CUDA_VISIBLE_DEVICES=0"
+        )
 
 
 def _assert_crypten_world_size(n_parties: int) -> None:
@@ -437,11 +490,7 @@ def _init_smpc_worker(
 
     requested = torch.device(device_name)
     if requested.type == "cuda":
-        import crypten.communicator as comm
-
-        rank = comm.get().get_rank()
-        n_gpus = torch.cuda.device_count()
-        device = torch.device(f"cuda:{rank % n_gpus}")
+        device = torch.device("cuda:0")
         torch.cuda.set_device(device)
     else:
         device = torch.device("cpu")
@@ -556,12 +605,13 @@ def benchmark_fine_tuning(
 
     _ = torch  # silence linter; torch is used via state-dict tensors below
 
-    device = resolve_device(device_name)
+    smpc_use_cuda = _smpc_use_cuda(device_name)
+    plain_device = torch.device("cpu")
 
     rows: List[Dict[str, Any]] = []
 
     for theta in theta_values:
-        state = _make_state_dict(theta, device)
+        state = _make_state_dict(theta, plain_device)
         actual_theta = _total_params(state)
         for n_clients in n_clients_values:
             local_states = [
@@ -592,6 +642,11 @@ def benchmark_fine_tuning(
                 f"starting SMPC on {device_name} (spawns {n_parties} CrypTen "
                 f"processes)..."
             )
+            if smpc_use_cuda and not os.environ.get("CUDA_VISIBLE_DEVICES", "").strip():
+                _log(
+                    "  Hint: export CUDA_VISIBLE_DEVICES=0 before running GPU SMPC "
+                    "(all parties share one GPU; avoids CrypTen init errors)."
+                )
             t_smpc = _median_smpc_seconds(
                 n_parties,
                 _time_ft_smpc_worker,
@@ -1265,11 +1320,13 @@ def main() -> None:
         f"n_reps={args.n_reps}, output={output_dir.resolve()}"
     )
     if device.type == "cuda":
-        import torch
-
+        gpu_ids = _party_gpu_ids(args.n_parties)
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(all)")
         _log(
-            f"CUDA: {torch.cuda.device_count()} GPU(s); "
-            f"SMPC party rank r → cuda:r % {torch.cuda.device_count()}"
+            f"CUDA SMPC: recommended export CUDA_VISIBLE_DEVICES=0 "
+            f"(parties share one GPU). Optional {COMM_COST_GPU_IDS_ENV}="
+            f"{','.join(str(i) for i in gpu_ids)}. "
+            f"Current CUDA_VISIBLE_DEVICES={visible}"
         )
     if args.quick:
         _log("(--quick preset: small configs; full sweep omit --quick)")
