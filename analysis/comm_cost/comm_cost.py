@@ -31,6 +31,52 @@ SMPC_DEVICE = "cuda"
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
 _DEFAULT_N_PARTIES = 3
 
+RESULT_CSV_FIELDNAMES = [
+    "workflow",
+    "mode",
+    "n_clients",
+    "n_parties",
+    "payload",
+    "rounds",
+    "t_seconds",
+    "bytes_per_client_per_round",
+    "bytes_per_client_total",
+    "bytes_federation_total",
+    "crypto_overhead",
+    "notes",
+]
+
+
+class IncrementalResultsWriter:
+    """Append benchmark rows to CSV after each configuration completes."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("w", newline="") as f:
+            csv.DictWriter(f, fieldnames=RESULT_CSV_FIELDNAMES).writeheader()
+        self.row_count = 0
+
+    def append(self, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with self.path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=RESULT_CSV_FIELDNAMES)
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        self.row_count += len(rows)
+
+
+def _commit_config_rows(
+    rows: List[Dict[str, Any]],
+    config_rows: List[Dict[str, Any]],
+    writer: Optional[IncrementalResultsWriter],
+) -> None:
+    rows.extend(config_rows)
+    if writer is not None:
+        writer.append(config_rows)
+
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
@@ -458,6 +504,7 @@ def benchmark_fine_tuning(
     n_parties: int,
     n_rounds: int,
     n_reps: int,
+    writer: Optional[IncrementalResultsWriter] = None,
 ) -> List[Dict[str, Any]]:
     import torch
 
@@ -518,7 +565,7 @@ def benchmark_fine_tuning(
 
             overhead = (t_smpc / t_plain) if t_plain > 0 else float("nan")
 
-            rows.append(
+            config_rows = [
                 {
                     "workflow": "fine_tuning",
                     "mode": "plain",
@@ -532,9 +579,7 @@ def benchmark_fine_tuning(
                     "bytes_federation_total": cost_plain.bytes_total_federation,
                     "crypto_overhead": 1.0,
                     "notes": cost_plain.notes,
-                }
-            )
-            rows.append(
+                },
                 {
                     "workflow": "fine_tuning",
                     "mode": "smpc",
@@ -548,8 +593,9 @@ def benchmark_fine_tuning(
                     "bytes_federation_total": cost_smpc.bytes_total_federation,
                     "crypto_overhead": overhead,
                     "notes": cost_smpc.notes,
-                }
-            )
+                },
+            ]
+            _commit_config_rows(rows, config_rows, writer)
             print(
                 f"[FT] theta={actual_theta:>9d} C={n_clients} P={n_parties} "
                 f"t_plain={t_plain*1e3:8.2f}ms t_smpc={t_smpc*1e3:8.2f}ms "
@@ -648,6 +694,7 @@ def benchmark_reference_mapping(
     k_values: List[int],
     n_classes: int,
     n_reps: int,
+    writer: Optional[IncrementalResultsWriter] = None,
 ) -> List[Dict[str, Any]]:
     rng = np.random.default_rng(42)
 
@@ -715,7 +762,7 @@ def benchmark_reference_mapping(
                         smpc=True,
                     )
                     overhead = (t_smpc / t_plain) if t_plain > 0 else float("nan")
-                    rows.append(
+                    config_rows = [
                         {
                             "workflow": "reference_mapping",
                             "mode": "plain",
@@ -729,9 +776,7 @@ def benchmark_reference_mapping(
                             "bytes_federation_total": cost_plain.bytes_total_federation,
                             "crypto_overhead": 1.0,
                             "notes": cost_plain.notes,
-                        }
-                    )
-                    rows.append(
+                        },
                         {
                             "workflow": "reference_mapping",
                             "mode": "smpc",
@@ -745,8 +790,9 @@ def benchmark_reference_mapping(
                             "bytes_federation_total": cost_smpc.bytes_total_federation,
                             "crypto_overhead": overhead,
                             "notes": cost_smpc.notes,
-                        }
-                    )
+                        },
+                    ]
+                    _commit_config_rows(rows, config_rows, writer)
                     print(
                         f"[KNN] {payload} C={n_clients} P={n_parties} "
                         f"t_plain={t_plain*1e3:8.2f}ms "
@@ -862,6 +908,7 @@ def benchmark_binning(
     hist_grid_resolution: int,
     n_samples_per_client: int,
     n_reps: int,
+    writer: Optional[IncrementalResultsWriter] = None,
 ) -> List[Dict[str, Any]]:
     from cliftiGPT.preprocessor.aggregation import (
         aggregate_bin_edges,
@@ -937,6 +984,7 @@ def benchmark_binning(
             42,
         )
 
+        config_rows: List[Dict[str, Any]] = []
         for strategy, t_val in [
             ("fed-weight-avg", t_weighted_plain),
             ("fed-weight-avg-smpc", t_weighted_smpc),
@@ -946,7 +994,7 @@ def benchmark_binning(
             cost = binning_bytes(
                 strategy, n_clients, n_parties, n_bins, hist_grid_resolution
             )
-            rows.append(
+            config_rows.append(
                 {
                     "workflow": "binning",
                     "mode": strategy,
@@ -970,6 +1018,7 @@ def benchmark_binning(
                     "notes": cost.notes,
                 }
             )
+        _commit_config_rows(rows, config_rows, writer)
         print(
             f"[BIN] C={n_clients} P={n_parties} "
             f"weighted plain={t_weighted_plain*1e3:7.2f}ms "
@@ -1109,67 +1158,54 @@ def main() -> None:
     if args.quick:
         _log("(--quick preset)")
 
-    all_rows: List[Dict[str, Any]] = []
+    results_csv = output_dir / "comm_cost_results.csv"
+    results_writer = IncrementalResultsWriter(results_csv)
 
     if "fine_tuning" in workflows:
-        all_rows.extend(
-            benchmark_fine_tuning(
-                theta_values=_parse_thetas(args.ft_thetas),
-                n_clients_values=_parse_int_list(args.ft_clients),
-                n_parties=args.n_parties,
-                n_rounds=args.ft_rounds,
-                n_reps=args.n_reps,
-            )
+        benchmark_fine_tuning(
+            theta_values=_parse_thetas(args.ft_thetas),
+            n_clients_values=_parse_int_list(args.ft_clients),
+            n_parties=args.n_parties,
+            n_rounds=args.ft_rounds,
+            n_reps=args.n_reps,
+            writer=results_writer,
         )
 
     if "reference_mapping" in workflows:
-        all_rows.extend(
-            benchmark_reference_mapping(
-                n_query_values=_parse_int_list(args.knn_n_query),
-                n_ref_values=_parse_int_list(args.knn_n_ref),
-                n_clients_values=_parse_int_list(args.knn_clients),
-                n_parties=args.n_parties,
-                d_embed=args.knn_d_embed,
-                k_values=_parse_int_list(args.knn_k),
-                n_classes=args.knn_n_classes,
-                n_reps=args.n_reps,
-            )
+        benchmark_reference_mapping(
+            n_query_values=_parse_int_list(args.knn_n_query),
+            n_ref_values=_parse_int_list(args.knn_n_ref),
+            n_clients_values=_parse_int_list(args.knn_clients),
+            n_parties=args.n_parties,
+            d_embed=args.knn_d_embed,
+            k_values=_parse_int_list(args.knn_k),
+            n_classes=args.knn_n_classes,
+            n_reps=args.n_reps,
+            writer=results_writer,
         )
 
     if "binning" in workflows:
-        all_rows.extend(
-            benchmark_binning(
-                n_clients_values=_parse_int_list(args.binning_clients),
-                n_parties=args.n_parties,
-                n_bins=args.binning_n_bins,
-                hist_grid_resolution=args.binning_grid_resolution,
-                n_samples_per_client=args.binning_n_samples_per_client,
-                n_reps=args.n_reps,
-            )
+        benchmark_binning(
+            n_clients_values=_parse_int_list(args.binning_clients),
+            n_parties=args.n_parties,
+            n_bins=args.binning_n_bins,
+            hist_grid_resolution=args.binning_grid_resolution,
+            n_samples_per_client=args.binning_n_samples_per_client,
+            n_reps=args.n_reps,
+            writer=results_writer,
         )
-
-    results_csv = output_dir / "comm_cost_results.csv"
-    fieldnames = [
-        "workflow", "mode", "n_clients", "n_parties", "payload", "rounds",
-        "t_seconds", "bytes_per_client_per_round",
-        "bytes_per_client_total", "bytes_federation_total",
-        "crypto_overhead", "notes",
-    ]
-    with results_csv.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        w.writerows(all_rows)
 
     metadata = {
         "args": vars(args),
         "n_parties": args.n_parties,
         "device": SMPC_DEVICE,
+        "rows_written": results_writer.row_count,
     }
     (output_dir / "comm_cost_metadata.json").write_text(
         json.dumps(metadata, indent=2)
     )
 
-    print(f"\nWrote {results_csv} ({len(all_rows)} rows)", flush=True)
+    print(f"\nWrote {results_csv} ({results_writer.row_count} rows)", flush=True)
     print(f"Wrote {output_dir / 'comm_cost_metadata.json'}", flush=True)
 
 

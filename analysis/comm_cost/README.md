@@ -25,6 +25,8 @@ Two independent counts:
 
 Wall-clock uses **5** timed repetitions per config (median reported) unless `--quick`.
 
+Each completed configuration is appended to `comm_cost_results.csv` immediately (with `fsync`), so a crash preserves all finished rows. Re-running truncates the CSV and starts fresh.
+
 ## Run
 
 From the repository root:
@@ -62,5 +64,6 @@ python analysis/comm_cost/comm_cost.py --quick
 
 ## Outputs
 
-`output/comm_cost/comm_cost_results.csv`, `comm_cost_metadata.json`, `comm_cost_*.png`,
+`output/comm_cost/comm_cost_results.csv` (appended after each configuration),
+`comm_cost_metadata.json`, `comm_cost_*.png`,
 `communication_cost_table.tex`, `communication_cost_table_*.tex`, `communication_cost_macros.tex`
