@@ -412,7 +412,58 @@ def _assert_crypten_world_size(n_parties: int) -> None:
         )
 
 
-def _make_state_dict(theta: int, n_layers: int = 4) -> Dict[str, "torch.Tensor"]:
+def resolve_device(device_arg: Optional[str] = None) -> "torch.device":
+    """Resolve wall-clock device: auto → cuda when available, else cpu."""
+    import torch
+
+    choice = (device_arg or "auto").lower()
+    if choice == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(choice)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"--device {device_arg} requested but torch.cuda.is_available() is False"
+        )
+    return device
+
+
+def _init_smpc_worker(
+    device_name: str, seed: int, n_parties: int
+) -> "torch.device":
+    """Select party-local device, seed RNGs, and verify CrypTen world size."""
+    import torch
+
+    from cliftiGPT.utils import set_seed
+
+    requested = torch.device(device_name)
+    if requested.type == "cuda":
+        import crypten.communicator as comm
+
+        rank = comm.get().get_rank()
+        n_gpus = torch.cuda.device_count()
+        device = torch.device(f"cuda:{rank % n_gpus}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+    set_seed(seed)
+    _assert_crypten_world_size(n_parties)
+    return device
+
+
+def _tensor_on(data: Any, device: "torch.device", dtype: Any = None) -> "torch.Tensor":
+    import torch
+
+    dtype = dtype or torch.float32
+    if isinstance(data, torch.Tensor):
+        return data.to(device=device, dtype=dtype)
+    return torch.tensor(data, dtype=dtype, device=device)
+
+
+def _make_state_dict(
+    theta: int,
+    device: Optional["torch.device"] = None,
+    n_layers: int = 4,
+) -> Dict[str, "torch.Tensor"]:
     """Build a plain state_dict whose total parameter count is ``theta``.
 
     Used only to feed ``FedAvg.aggregate_plain`` / ``aggregate_smpc`` with
@@ -420,6 +471,8 @@ def _make_state_dict(theta: int, n_layers: int = 4) -> Dict[str, "torch.Tensor"]
     """
     import torch
 
+    if device is None:
+        device = torch.device("cpu")
     per_layer = max(1, theta // n_layers)
     side = max(1, int(math.sqrt(per_layer)))
     state: Dict[str, torch.Tensor] = {}
@@ -429,13 +482,13 @@ def _make_state_dict(theta: int, n_layers: int = 4) -> Dict[str, "torch.Tensor"]
             shape = (max(1, remaining // side), side)
         else:
             shape = (side, side)
-        t = torch.randn(*shape, dtype=torch.float32) * 0.01
+        t = torch.randn(*shape, dtype=torch.float32, device=device) * 0.01
         state[f"layer{li}.weight"] = t
         remaining -= int(np.prod(shape))
         if remaining <= 0:
             break
     if remaining > 0:
-        state[f"bias"] = torch.randn(remaining, dtype=torch.float32) * 0.01
+        state[f"bias"] = torch.randn(remaining, dtype=torch.float32, device=device) * 0.01
     return state
 
 
@@ -449,18 +502,16 @@ def _time_ft_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
+    device_name: str,
 ) -> float:
     """Run fine-tuning SMPC aggregation inside a CrypTen process group."""
     import crypten
-    import torch
 
     from cliftiGPT.federated.aggregator import FedAvg
-    from cliftiGPT.utils import set_seed
 
-    set_seed(seed)
-    _assert_crypten_world_size(n_parties)
+    device = _init_smpc_worker(device_name, seed, n_parties)
 
-    state = _make_state_dict(theta)
+    state = _make_state_dict(theta, device)
     agg_smpc = FedAvg(
         weighted=False,
         n_rounds=1,
@@ -490,6 +541,7 @@ def benchmark_fine_tuning(
     n_parties: int,
     n_rounds: int,
     n_reps: int,
+    device_name: str,
 ) -> List[Dict[str, Any]]:
     """Time ``FedAvg.aggregate_plain`` and ``aggregate_smpc``.
 
@@ -504,10 +556,12 @@ def benchmark_fine_tuning(
 
     _ = torch  # silence linter; torch is used via state-dict tensors below
 
+    device = resolve_device(device_name)
+
     rows: List[Dict[str, Any]] = []
 
     for theta in theta_values:
-        state = _make_state_dict(theta)
+        state = _make_state_dict(theta, device)
         actual_theta = _total_params(state)
         for n_clients in n_clients_values:
             local_states = [
@@ -535,8 +589,8 @@ def benchmark_fine_tuning(
 
             _log(
                 f"[FT]   plaintext median={t_plain*1e3:.1f}ms — "
-                f"starting SMPC (spawns {n_parties} CrypTen processes; "
-                f"can take tens of minutes on CPU for large |θ|)..."
+                f"starting SMPC on {device_name} (spawns {n_parties} CrypTen "
+                f"processes)..."
             )
             t_smpc = _median_smpc_seconds(
                 n_parties,
@@ -546,6 +600,7 @@ def benchmark_fine_tuning(
                 n_parties,
                 n_reps,
                 42,
+                device_name,
             )
 
             cost_plain = ft_weight_sharing_bytes(
@@ -676,15 +731,12 @@ def _time_knn_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
+    device_name: str,
 ) -> float:
     """Run federated KNN SMPC inside a CrypTen process group."""
     import crypten
-    import torch
 
-    from cliftiGPT.utils import set_seed
-
-    set_seed(seed)
-    _assert_crypten_world_size(n_parties)
+    device = _init_smpc_worker(device_name, seed, n_parties)
 
     rng = np.random.default_rng(seed)
     query = rng.standard_normal((n_query, d_embed)).astype(np.float32)
@@ -692,10 +744,8 @@ def _time_knn_smpc_worker(
         rng.standard_normal((n_ref_local, d_embed)).astype(np.float32)
         for _ in range(n_clients)
     ]
-    references_torch = [
-        torch.tensor(r, dtype=torch.float32) for r in references_np
-    ]
-    query_enc = crypten.cryptensor(torch.tensor(query, dtype=torch.float32))
+    references_torch = [_tensor_on(r, device) for r in references_np]
+    query_enc = crypten.cryptensor(_tensor_on(query, device))
     return _median_seconds(
         lambda: _smpc_knn(query_enc, references_torch, k),
         n_reps,
@@ -711,6 +761,7 @@ def benchmark_reference_mapping(
     k_values: List[int],
     n_classes: int,
     n_reps: int,
+    device_name: str,
 ) -> List[Dict[str, Any]]:
     """Time plaintext FAISS KNN vs the CrypTen SMPC distance + top-k pipeline.
 
@@ -747,7 +798,8 @@ def benchmark_reference_mapping(
                     )
                     _log(
                         f"[KNN] {payload} C={n_clients} P={n_parties}: "
-                        f"plaintext={t_plain*1e3:.1f}ms — starting SMPC..."
+                        f"plaintext={t_plain*1e3:.1f}ms — starting SMPC on "
+                        f"{device_name}..."
                     )
 
                     t_smpc = _median_smpc_seconds(
@@ -761,6 +813,7 @@ def benchmark_reference_mapping(
                         n_parties,
                         n_reps,
                         42,
+                        device_name,
                     )
 
                     cost_plain = knn_reference_mapping_bytes(
@@ -839,20 +892,18 @@ def _time_binning_weighted_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
+    device_name: str,
 ) -> float:
     """Time fed-weight-avg SMPC aggregation inside a CrypTen process group."""
     import crypten
-    import torch
 
     from cliftiGPT.preprocessor.aggregation import (
         aggregate_bin_edge_contributions_smpc,
         local_bin_edge_contribution,
         reveal_nonzero_total,
     )
-    from cliftiGPT.utils import set_seed
 
-    set_seed(seed)
-    _assert_crypten_world_size(n_parties)
+    device = _init_smpc_worker(device_name, seed, n_parties)
 
     rng = np.random.default_rng(seed)
     per_client_nonzero = [
@@ -865,16 +916,13 @@ def _time_binning_weighted_smpc_worker(
         for c in per_client_nonzero
     ]
     n_shares = [
-        crypten.cryptensor(torch.tensor([float(n)], dtype=torch.float32))
+        crypten.cryptensor(_tensor_on([float(n)], device))
         for _, n in local_edges_pairs
     ]
     total_n = reveal_nonzero_total(n_shares)
     contrib_shares = [
         crypten.cryptensor(
-            torch.tensor(
-                local_bin_edge_contribution(le, n, total_n),
-                dtype=torch.float32,
-            )
+            _tensor_on(local_bin_edge_contribution(le, n, total_n), device)
         )
         for le, n in local_edges_pairs
     ]
@@ -892,20 +940,18 @@ def _time_binning_hist_smpc_worker(
     n_parties: int,
     n_reps: int,
     seed: int,
+    device_name: str,
 ) -> float:
     """Time fed-hist SMPC aggregation inside a CrypTen process group."""
     import crypten
-    import torch
 
     from cliftiGPT.preprocessor.aggregation import (
         aggregate_global_max_expr,
         aggregate_secure_histogram_bin_edges,
         secure_reveal_envelope_max,
     )
-    from cliftiGPT.utils import set_seed
 
-    set_seed(seed)
-    _assert_crypten_world_size(n_parties)
+    device = _init_smpc_worker(device_name, seed, n_parties)
 
     rng = np.random.default_rng(seed)
     per_client_nonzero = [
@@ -915,11 +961,11 @@ def _time_binning_hist_smpc_worker(
     client_max_list = [float(c.max()) for c in per_client_nonzero]
     client_n_list = [int(c.size) for c in per_client_nonzero]
     max_shares = [
-        crypten.cryptensor(torch.tensor([float(m)], dtype=torch.float32))
+        crypten.cryptensor(_tensor_on([float(m)], device))
         for m in client_max_list
     ]
     n_shares_hist = [
-        crypten.cryptensor(torch.tensor([float(n)], dtype=torch.float32))
+        crypten.cryptensor(_tensor_on([float(n)], device))
         for n in client_n_list
     ]
     max_expr_smpc = secure_reveal_envelope_max(max_shares)
@@ -928,9 +974,7 @@ def _time_binning_hist_smpc_worker(
     )
     hist_shares = [
         crypten.cryptensor(
-            torch.tensor(
-                np.histogram(nz, bins=value_grid_smpc)[0].astype(np.float32)
-            )
+            _tensor_on(np.histogram(nz, bins=value_grid_smpc)[0].astype(np.float32), device)
         )
         for nz in per_client_nonzero
     ]
@@ -949,6 +993,7 @@ def benchmark_binning(
     hist_grid_resolution: int,
     n_samples_per_client: int,
     n_reps: int,
+    device_name: str,
 ) -> List[Dict[str, Any]]:
     """Time fed-weight-avg / fed-hist plain and SMPC aggregation paths.
 
@@ -996,6 +1041,7 @@ def benchmark_binning(
             n_parties,
             n_reps,
             42,
+            device_name,
         )
 
         max_expr = aggregate_global_max_expr(client_max_list)
@@ -1027,6 +1073,7 @@ def benchmark_binning(
             n_parties,
             n_reps,
             42,
+            device_name,
         )
 
         for strategy, t_val in [
@@ -1153,6 +1200,16 @@ def parse_args():
         help="Synthetic non-zero values per client for the binning benchmark.",
     )
     p.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "cpu", "cuda"],
+        help=(
+            "PyTorch device for wall-clock benchmarks. auto=cuda when available. "
+            "Under cuda, CrypTen party rank r uses cuda:r %% num_gpus."
+        ),
+    )
+    p.add_argument(
         "--quick",
         action="store_true",
         help=(
@@ -1185,6 +1242,8 @@ def main() -> None:
     if args.quick:
         _apply_quick_preset(args)
     args.n_parties = resolve_n_parties(args.n_parties)
+    device = resolve_device(args.device)
+    device_name = str(device)
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
@@ -1202,9 +1261,16 @@ def main() -> None:
 
     _log(
         f"Communication-cost benchmark — P={args.n_parties}, "
-        f"workflows={sorted(workflows)}, n_reps={args.n_reps}, "
-        f"output={output_dir.resolve()}"
+        f"device={device_name}, workflows={sorted(workflows)}, "
+        f"n_reps={args.n_reps}, output={output_dir.resolve()}"
     )
+    if device.type == "cuda":
+        import torch
+
+        _log(
+            f"CUDA: {torch.cuda.device_count()} GPU(s); "
+            f"SMPC party rank r → cuda:r % {torch.cuda.device_count()}"
+        )
     if args.quick:
         _log("(--quick preset: small configs; full sweep omit --quick)")
 
@@ -1218,6 +1284,7 @@ def main() -> None:
                 n_parties=args.n_parties,
                 n_rounds=args.ft_rounds,
                 n_reps=args.n_reps,
+                device_name=device_name,
             )
         )
 
@@ -1232,6 +1299,7 @@ def main() -> None:
                 k_values=_parse_int_list(args.knn_k),
                 n_classes=args.knn_n_classes,
                 n_reps=args.n_reps,
+                device_name=device_name,
             )
         )
 
@@ -1244,6 +1312,7 @@ def main() -> None:
                 hist_grid_resolution=args.binning_grid_resolution,
                 n_samples_per_client=args.binning_n_samples_per_client,
                 n_reps=args.n_reps,
+                device_name=device_name,
             )
         )
 
