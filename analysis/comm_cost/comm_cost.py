@@ -28,7 +28,6 @@ import argparse
 import csv
 import json
 import math
-import multiprocessing as mp
 import os
 import sys
 import time
@@ -390,7 +389,7 @@ def _median_smpc_seconds(
         return float(worker(*args, **kwargs))
 
     device_name = str(args[-1]) if args else "cpu"
-    _configure_crypten_multiprocess(_smpc_use_cuda(device_name), n_parties)
+    _warn_cuda_multiprocess(_smpc_use_cuda(device_name))
 
     from crypten.mpc import run_multiprocess
 
@@ -433,25 +432,16 @@ def _party_gpu_ids(n_parties: int) -> List[int]:
     return list(range(n_parties))
 
 
-def _configure_crypten_multiprocess(smpc_use_cuda: bool, n_parties: int) -> None:
-    """Use spawn (not fork) so CUDA is not inherited from the parent."""
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
-
+def _warn_cuda_multiprocess(smpc_use_cuda: bool) -> None:
+    """Log GPU env requirements; CrypTen uses fork, so parent must stay off CUDA."""
     if not smpc_use_cuda:
         return
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if visible and "," not in visible:
-        return
-
-    if visible and "," in visible:
+    if not visible or "," in visible:
         _log(
-            "Note: CUDA_VISIBLE_DEVICES lists multiple GPUs. CrypTen "
-            "multiprocess is most reliable with a single visible GPU, e.g. "
-            "export CUDA_VISIBLE_DEVICES=0"
+            "GPU SMPC: export CUDA_VISIBLE_DEVICES=0 before starting Python "
+            "(one GPU shared by all parties). Do not set multiple GPUs."
         )
 
 
