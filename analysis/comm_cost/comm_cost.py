@@ -1041,7 +1041,7 @@ def parse_args():
     )
     p.add_argument("--knn_d_embed", type=int, default=128)
     p.add_argument(
-        "--knn_k", type=str, default="5,20",
+        "--knn_k", type=str, default="5,10",
         help="Comma-separated k values for the KNN benchmark.",
     )
     p.add_argument("--knn_n_classes", type=int, default=10)

@@ -20,7 +20,7 @@ Two independent counts:
 | Workflow | Swept parameters |
 |---|---|
 | Fine-tuning | `\|θ\|` ∈ {1M, 10M}, C ∈ {2, 3, 5}, R = 5 rounds (bytes only) |
-| Reference mapping | n_q ∈ {500, 2000}, n_r ∈ {1000, 5000}, C ∈ {2, 5}, k ∈ {5, 20}, d = 128 |
+| Reference mapping | n_q ∈ {500, 2000}, n_r ∈ {1000, 5000}, C ∈ {2, 5}, k ∈ {5, 10}, d = 128 |
 | Binning | C ∈ {2, 5, 10}, n_bins = 51, grid M = 4096 |
 
 Wall-clock uses **5** timed repetitions per config (median reported) unless `--quick`.
