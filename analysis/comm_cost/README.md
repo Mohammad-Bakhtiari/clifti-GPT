@@ -73,6 +73,20 @@ python analysis/comm_cost/plot_comm_cost.py
 python analysis/comm_cost/render_comm_cost_tex.py
 ```
 
+**Runtime:** The default sweep times SMPC on up to 50M parameters with
+`n_reps=5` and `P=3` CrypTen processes. On CPU this can take many hours
+before the first `[FT]` line appears, because progress is only printed
+after each SMPC block finishes. Use `--quick` to verify the pipeline in
+minutes:
+
+```bash
+python analysis/comm_cost/comm_cost.py --quick
+```
+
+Analytical byte counts in the CSV do not depend on wall-clock; you can
+also recompute bytes without CrypTen via `regenerate_comm_cost_at_c.py`
+and keep timings from an earlier full run.
+
 Or build the supplement PDF in one step:
 
 ```bash

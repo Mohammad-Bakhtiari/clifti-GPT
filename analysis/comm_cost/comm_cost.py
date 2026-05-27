@@ -39,7 +39,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analysis.comm_cost.paths import COMM_COST_OUTPUT_DIR  # noqa: E402
+from analysis.comm_cost.paths import COMM_COST_OUTPUT_DIR, REPO_ROOT  # noqa: E402
 
 import numpy as np
 
@@ -54,6 +54,10 @@ SHA256_HEX_BYTES = 64
 # Env var read by ``resolve_n_parties()`` when ``--n_parties`` is omitted.
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
 _DEFAULT_N_PARTIES = 3
+
+
+def _log(msg: str) -> None:
+    print(msg, flush=True)
 
 
 def resolve_n_parties(cli_value: Optional[int] = None) -> int:
@@ -520,11 +524,20 @@ def benchmark_fine_tuning(
             agg_plain.global_model_keys = list(state.keys())
             agg_plain.global_weight_shapes = {k: v.shape for k, v in state.items()}
 
+            _log(
+                f"[FT] theta={actual_theta} C={n_clients} P={n_parties}: "
+                f"timing plaintext ({n_reps} reps)..."
+            )
             t_plain = _median_seconds(
                 lambda: agg_plain.aggregate_plain(local_states, n_samples),
                 n_reps,
             )
 
+            _log(
+                f"[FT]   plaintext median={t_plain*1e3:.1f}ms — "
+                f"starting SMPC (spawns {n_parties} CrypTen processes; "
+                f"can take tens of minutes on CPU for large |θ|)..."
+            )
             t_smpc = _median_smpc_seconds(
                 n_parties,
                 _time_ft_smpc_worker,
@@ -579,7 +592,8 @@ def benchmark_fine_tuning(
             print(
                 f"[FT] theta={actual_theta:>9d} C={n_clients} P={n_parties} "
                 f"t_plain={t_plain*1e3:8.2f}ms t_smpc={t_smpc*1e3:8.2f}ms "
-                f"overhead={overhead:5.1f}x"
+                f"overhead={overhead:5.1f}x",
+                flush=True,
             )
 
     return rows
@@ -728,6 +742,14 @@ def benchmark_reference_mapping(
                         n_reps,
                     )
 
+                    payload = (
+                        f"n_q={n_query},n_r={n_ref_total},d={d_embed},k={k}"
+                    )
+                    _log(
+                        f"[KNN] {payload} C={n_clients} P={n_parties}: "
+                        f"plaintext={t_plain*1e3:.1f}ms — starting SMPC..."
+                    )
+
                     t_smpc = _median_smpc_seconds(
                         n_parties,
                         _time_knn_smpc_worker,
@@ -762,9 +784,6 @@ def benchmark_reference_mapping(
                         smpc=True,
                     )
                     overhead = (t_smpc / t_plain) if t_plain > 0 else float("nan")
-                    payload = (
-                        f"n_q={n_query},n_r={n_ref_total},d={d_embed},k={k}"
-                    )
                     rows.append(
                         {
                             "workflow": "reference_mapping",
@@ -801,7 +820,8 @@ def benchmark_reference_mapping(
                         f"[KNN] {payload} C={n_clients} P={n_parties} "
                         f"t_plain={t_plain*1e3:8.2f}ms "
                         f"t_smpc={t_smpc*1e3:8.2f}ms "
-                        f"overhead={overhead:7.1f}x"
+                        f"overhead={overhead:7.1f}x",
+                        flush=True,
                     )
 
     return rows
@@ -963,6 +983,10 @@ def benchmark_binning(
             n_reps,
         )
 
+        _log(
+            f"[BIN] C={n_clients} P={n_parties}: weighted plaintext "
+            f"={t_weighted_plain*1e3:.1f}ms — starting weighted SMPC..."
+        )
         t_weighted_smpc = _median_smpc_seconds(
             n_parties,
             _time_binning_weighted_smpc_worker,
@@ -989,6 +1013,10 @@ def benchmark_binning(
             n_reps,
         )
 
+        _log(
+            f"[BIN] C={n_clients} P={n_parties}: hist plaintext "
+            f"={t_hist_plain*1e3:.1f}ms — starting hist SMPC..."
+        )
         t_hist_smpc = _median_smpc_seconds(
             n_parties,
             _time_binning_hist_smpc_worker,
@@ -1039,7 +1067,8 @@ def benchmark_binning(
             f"weighted plain={t_weighted_plain*1e3:7.2f}ms "
             f"smpc={t_weighted_smpc*1e3:7.2f}ms "
             f"hist plain={t_hist_plain*1e3:7.2f}ms "
-            f"smpc={t_hist_smpc*1e3:7.2f}ms"
+            f"smpc={t_hist_smpc*1e3:7.2f}ms",
+            flush=True,
         )
 
     return rows
@@ -1123,7 +1152,28 @@ def parse_args():
         "--binning_n_samples_per_client", type=int, default=100_000,
         help="Synthetic non-zero values per client for the binning benchmark.",
     )
+    p.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "Minimal sweep for smoke testing: small |θ|, one client count "
+            "per workflow, n_reps=1. Analytical bytes still use full formulas; "
+            "wall-clock is only indicative."
+        ),
+    )
     return p.parse_args()
+
+
+def _apply_quick_preset(args: argparse.Namespace) -> None:
+    args.n_reps = 1
+    args.ft_thetas = "10_000"
+    args.ft_clients = "2"
+    args.knn_n_query = "500"
+    args.knn_n_ref = "1000"
+    args.knn_clients = "2"
+    args.knn_k = "5"
+    args.binning_clients = "2"
+    args.binning_n_samples_per_client = 1_000
 
 
 def _parse_thetas(s: str) -> List[int]:
@@ -1132,8 +1182,12 @@ def _parse_thetas(s: str) -> List[int]:
 
 def main() -> None:
     args = parse_args()
+    if args.quick:
+        _apply_quick_preset(args)
     args.n_parties = resolve_n_parties(args.n_parties)
     output_dir = Path(args.output_dir)
+    if not output_dir.is_absolute():
+        output_dir = REPO_ROOT / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     workflows = {w.strip() for w in args.workflows.split(",") if w.strip()}
     valid = {"fine_tuning", "reference_mapping", "binning"}
@@ -1145,6 +1199,14 @@ def main() -> None:
         raise ValueError(
             f"--n_parties must be >= 2 for additive sharing; got {args.n_parties}"
         )
+
+    _log(
+        f"Communication-cost benchmark — P={args.n_parties}, "
+        f"workflows={sorted(workflows)}, n_reps={args.n_reps}, "
+        f"output={output_dir.resolve()}"
+    )
+    if args.quick:
+        _log("(--quick preset: small configs; full sweep omit --quick)")
 
     all_rows: List[Dict[str, Any]] = []
 
@@ -1219,8 +1281,8 @@ def main() -> None:
         json.dumps(metadata, indent=2)
     )
 
-    print(f"\nWrote {results_csv} ({len(all_rows)} rows)")
-    print(f"Wrote {output_dir / 'comm_cost_metadata.json'}")
+    print(f"\nWrote {results_csv} ({len(all_rows)} rows)", flush=True)
+    print(f"Wrote {output_dir / 'comm_cost_metadata.json'}", flush=True)
 
 
 if __name__ == "__main__":
