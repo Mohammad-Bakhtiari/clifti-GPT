@@ -29,6 +29,7 @@ SHA256_HEX_BYTES = 64
 SMPC_DEVICE = "cuda"
 
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
+COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV = "COMM_COST_SMPC_ONE_GPU_PER_PARTY"
 _DEFAULT_N_PARTIES = 3
 
 RESULT_CSV_FIELDNAMES = [
@@ -320,6 +321,24 @@ def _median_smpc_seconds(
     return _run_smpc_isolated_subprocess(n_parties, worker, args)
 
 
+def _smpc_one_gpu_per_party_enabled() -> bool:
+    return os.environ.get(COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV) == "1"
+
+
+def _smpc_subprocess_cuda_visible_devices(
+    n_parties: int,
+    one_gpu_per_party: bool,
+    env_cuda: str,
+) -> str:
+    if one_gpu_per_party:
+        if env_cuda.strip():
+            return env_cuda.strip()
+        return ",".join(str(i) for i in range(n_parties))
+    if env_cuda.strip():
+        return env_cuda.strip()
+    return "0"
+
+
 def _run_smpc_isolated_subprocess(
     n_parties: int,
     worker,
@@ -328,8 +347,14 @@ def _run_smpc_isolated_subprocess(
     env = os.environ.copy()
     env["COMM_COST_ISOLATED_SMPC"] = "1"
     env.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    if not env.get("CUDA_VISIBLE_DEVICES", "").strip():
-        env["CUDA_VISIBLE_DEVICES"] = "0"
+    one_gpu_per_party = _smpc_one_gpu_per_party_enabled()
+    env["CUDA_VISIBLE_DEVICES"] = _smpc_subprocess_cuda_visible_devices(
+        n_parties,
+        one_gpu_per_party,
+        env.get("CUDA_VISIBLE_DEVICES", ""),
+    )
+    if one_gpu_per_party:
+        env[COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV] = "1"
 
     fd, payload_path = tempfile.mkstemp(suffix=".pkl", prefix="comm_cost_smpc_")
     os.close(fd)
@@ -405,11 +430,30 @@ def _benchmark_smpc_seed(seed: int) -> None:
     crypten.manual_seed(seed, seed, seed)
 
 
-def _init_smpc_worker(seed: int, n_parties: int) -> "torch.device":
+def _smpc_device_for_party(n_parties: int) -> "torch.device":
     import torch
+    import crypten.communicator as comm
+
+    if _smpc_one_gpu_per_party_enabled() and torch.cuda.is_available():
+        rank = comm.get().get_rank()
+        n_visible = torch.cuda.device_count()
+        if rank >= n_visible:
+            raise RuntimeError(
+                f"CrypTen party rank {rank} but only {n_visible} visible GPU(s). "
+                f"For P={n_parties} with one GPU per party, set "
+                f"CUDA_VISIBLE_DEVICES to {n_parties} devices "
+                f"(e.g. 0,1,2) or pass --no-smpc-one-gpu-per-party."
+            )
+        torch.cuda.set_device(rank)
+        return torch.device(f"cuda:{rank}")
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
+    return device
+
+
+def _init_smpc_worker(seed: int, n_parties: int) -> "torch.device":
+    device = _smpc_device_for_party(n_parties)
     _benchmark_smpc_seed(seed)
     _assert_crypten_world_size(n_parties)
     return device
@@ -1109,6 +1153,16 @@ def parse_args():
         action="store_true",
         help="Minimal smoke-test sweep (small configs, n_reps=1).",
     )
+    p.add_argument(
+        "--smpc-one-gpu-per-party",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Map CrypTen party rank r to cuda:r using P visible GPUs (default: on). "
+            "When CUDA_VISIBLE_DEVICES is unset, the isolated SMPC child uses "
+            "0,1,...,P-1."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1149,11 +1203,31 @@ def main() -> None:
             f"--n_parties must be >= 2 for additive sharing; got {args.n_parties}"
         )
 
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(unset → 0 in child)")
+    if args.smpc_one_gpu_per_party:
+        os.environ[COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV] = "1"
+    else:
+        os.environ.pop(COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV, None)
+
+    parent_cuda = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if args.smpc_one_gpu_per_party:
+        smpc_cuda = _smpc_subprocess_cuda_visible_devices(
+            args.n_parties, True, parent_cuda
+        )
+        n_visible = len([x for x in smpc_cuda.split(",") if x.strip()])
+        if n_visible < args.n_parties:
+            _log(
+                f"WARNING: --smpc-one-gpu-per-party needs >= {args.n_parties} "
+                f"visible GPUs for P={args.n_parties}; SMPC child will use "
+                f"CUDA_VISIBLE_DEVICES={smpc_cuda} ({n_visible} device(s))."
+            )
+    else:
+        smpc_cuda = parent_cuda or "0"
+
     _log(
         f"Communication-cost benchmark — P={args.n_parties}, GPU, "
         f"workflows={sorted(workflows)}, n_reps={args.n_reps}, "
-        f"CUDA_VISIBLE_DEVICES={visible}, output={output_dir.resolve()}"
+        f"smpc_one_gpu_per_party={args.smpc_one_gpu_per_party}, "
+        f"SMPC CUDA_VISIBLE_DEVICES={smpc_cuda}, output={output_dir.resolve()}"
     )
     if args.quick:
         _log("(--quick preset)")
@@ -1199,6 +1273,8 @@ def main() -> None:
         "args": vars(args),
         "n_parties": args.n_parties,
         "device": SMPC_DEVICE,
+        "smpc_one_gpu_per_party": args.smpc_one_gpu_per_party,
+        "smpc_cuda_visible_devices": smpc_cuda,
         "rows_written": results_writer.row_count,
     }
     (output_dir / "comm_cost_metadata.json").write_text(

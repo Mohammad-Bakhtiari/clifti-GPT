@@ -32,7 +32,7 @@ Each completed configuration is appended to `comm_cost_results.csv` immediately 
 From the repository root:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export COMM_COST_N_PARTIES=3
 
@@ -41,8 +41,18 @@ python analysis/comm_cost/plot_comm_cost.py
 python analysis/comm_cost/render_comm_cost_tex.py
 ```
 
-SMPC wall-clock runs in an isolated subprocess per config. Use one visible GPU
-(`CUDA_VISIBLE_DEVICES=0`); all P parties share it.
+SMPC wall-clock runs in an isolated subprocess per config. By default
+(`--smpc-one-gpu-per-party`, on), CrypTen party rank `r` uses `cuda:r`, so set
+`CUDA_VISIBLE_DEVICES` to **P** GPUs (e.g. `0,1,2` for P=3). If
+`CUDA_VISIBLE_DEVICES` is unset, the child subprocess uses `0,1,...,P-1`
+automatically.
+
+To force all parties onto one GPU (legacy behavior):
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+python analysis/comm_cost/comm_cost.py --no-smpc-one-gpu-per-party
+```
 
 ### `--quick`
 
