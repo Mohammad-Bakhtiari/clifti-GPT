@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Plot communication-cost figures from comm_cost_results.csv."""
+"""Plot communication-cost figures from comm_cost_results.csv (wall-clock only)."""
 
 import argparse
 import sys
@@ -144,7 +144,7 @@ def _plot_ft_scaling_ax(ax, df: pd.DataFrame) -> None:
         if not sub.empty:
             ax.plot(
                 sub[x_col],
-                sub["bytes_per_client_total"] / 1e6,
+                sub["t_seconds"],
                 marker + "-",
                 color=color,
                 label=mode.upper() if mode == "smpc" else "Plaintext",
@@ -154,15 +154,17 @@ def _plot_ft_scaling_ax(ax, df: pd.DataFrame) -> None:
     party_suffix = f", P={parties}" if parties else ""
     if fixed_c is not None:
         ax.set_xlabel(r"Trainable parameters $|\theta|$")
-        ax.set_ylabel("Bytes / client (MB)")
+        ax.set_ylabel("Wall-clock (s)")
         ax.set_title(f"Fine-tuning, C={fixed_c}{party_suffix}")
+        ax.set_yscale("log")
         ax.ticklabel_format(style="sci", axis="x", scilimits=(0, 0))
     else:
         ax.set_xlabel("Number of clients C")
-        ax.set_ylabel("Bytes / client (MB)")
+        ax.set_ylabel("Wall-clock (s)")
         ax.set_title(
             f"Fine-tuning, |θ|={int(ft_t['theta'].iloc[0]):,}{party_suffix}"
         )
+        ax.set_yscale("log")
         ax.set_xticks(sorted(ft_t["n_clients"].unique()))
 
 
@@ -184,7 +186,7 @@ def _plot_knn_scaling_ax(ax, df: pd.DataFrame) -> None:
         if not sub.empty:
             ax.plot(
                 sub["n_ref"],
-                sub["bytes_per_client_total"] / 1e6,
+                sub["t_seconds"],
                 marker + "-",
                 color=color,
                 label="SMPC" if mode == "smpc" else "Plaintext",
@@ -194,14 +196,14 @@ def _plot_knn_scaling_ax(ax, df: pd.DataFrame) -> None:
     parties = _fixed_parties(slc)
     party_suffix = f", P={parties}" if parties else ""
     ax.set_xlabel("Total reference cells")
-    ax.set_ylabel("Bytes / client (MB)")
+    ax.set_ylabel("Wall-clock (s)")
     ax.set_title(f"KNN, n_q={ref_nq}, C={ref_C}{party_suffix}")
     ax.set_xscale("log")
     ax.set_yscale("log")
 
 
 def plot_scaling(df: pd.DataFrame, out_dir: Path) -> None:
-    """Bandwidth scaling panels: FT vs C and KNN vs n_ref."""
+    """Wall-clock scaling panels: FT vs |θ|/C and KNN vs n_ref."""
     import matplotlib.pyplot as plt
 
     _apply_style()

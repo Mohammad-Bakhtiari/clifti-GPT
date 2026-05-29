@@ -280,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ft_thetas", type=str, default="1_000_000,10_000_000")
     p.add_argument("--ft_rounds", type=int, default=5)
     p.add_argument("--knn_n_query", type=str, default="500,2000")
-    p.add_argument("--knn_n_ref", type=str, default="1000,5000")
+    p.add_argument("--knn_n_ref", type=str, default="1000,5000,10000")
     p.add_argument("--knn_k", type=str, default="5,10")
     p.add_argument("--knn_d_embed", type=int, default=128)
     p.add_argument("--knn_n_classes", type=int, default=10)

@@ -1,5 +1,9 @@
 #!/usr/bin/env python
-"""Communication-cost benchmark: analytical bytes and GPU SMPC wall-clock."""
+"""Communication-cost benchmark: GPU SMPC wall-clock (+ analytical bytes in CSV).
+
+Default KNN sweep: n_q in {500,2000}, n_r in {1000,5000,10000}, C in {2,5},
+k in {5,10}. See analysis/comm_cost/README.md.
+"""
 
 import argparse
 import csv
@@ -1125,8 +1129,11 @@ def parse_args():
         help="Comma-separated query counts for the KNN benchmark.",
     )
     p.add_argument(
-        "--knn_n_ref", type=str, default="1000,5000",
-        help="Comma-separated total reference counts for the KNN benchmark.",
+        "--knn_n_ref", type=str, default="1000,5000,10000",
+        help=(
+            "Comma-separated federation-wide reference counts n_r for KNN. "
+            "Default stops at 10k (50k can OOM at n_q=2000 on ~15 GiB GPUs)."
+        ),
     )
     p.add_argument(
         "--knn_clients", type=str, default="2,5",
@@ -1135,7 +1142,10 @@ def parse_args():
     p.add_argument("--knn_d_embed", type=int, default=128)
     p.add_argument(
         "--knn_k", type=str, default="5,10",
-        help="Comma-separated k values for the KNN benchmark.",
+        help=(
+            "Comma-separated k values for KNN (matches tasks/args default k=10). "
+            "k=20 is omitted from defaults (much slower; higher OOM risk)."
+        ),
     )
     p.add_argument("--knn_n_classes", type=int, default=10)
     p.add_argument(
