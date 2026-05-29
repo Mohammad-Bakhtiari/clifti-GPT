@@ -1,9 +1,9 @@
 # Communication-cost analysis
 
 Benchmarks communication cost for federated fine-tuning, reference mapping (KNN),
-and binning. Produces GPU SMPC wall-clock timings in `output/comm_cost/`.
-Analytical byte formulas are computed internally for reference but are **not**
-included in generated figures or LaTeX tables.
+and binning. Produces **GPU wall-clock** timings for both plaintext and SMPC in
+`output/comm_cost/`. Analytical byte formulas are computed internally for reference
+but are **not** included in generated figures or LaTeX tables.
 
 ## Parameters
 
@@ -15,6 +15,17 @@ Two independent counts:
   `WORLD_SIZE` for wall-clock.
 
 **P** is set via `--n_parties`, env `COMM_COST_N_PARTIES`, or default `3`.
+
+### Timing methodology
+
+- **Plaintext** baselines run on **`cuda:0`** (Torch GPU kernels).
+- **SMPC** runs on GPU with **P** parties (`cuda:0..P-1` when
+  `--smpc-one-gpu-per-party` is on).
+- KNN plaintext uses the same GPU distance / top-\(k\) structure as the SMPC path
+  (not CPU FAISS).
+- Overhead ratios \(t_{\mathrm{SMPC}} / t_{\mathrm{plain}}\) therefore reflect
+  cryptographic cost on comparable hardware, not CPU vs GPU.
+- Timings exclude real inter-site network latency.
 
 ### Default sweeps
 
@@ -50,7 +61,8 @@ python analysis/comm_cost/render_comm_cost_tex.py
 
 SMPC wall-clock runs in an isolated subprocess per config. By default
 (`--smpc-one-gpu-per-party`, on), CrypTen party rank `r` uses `cuda:r`, so set
-`CUDA_VISIBLE_DEVICES` to **P** GPUs (e.g. `0,1,2` for P=3).
+`CUDA_VISIBLE_DEVICES` to **P** GPUs (e.g. `0,1,2` for P=3). Plaintext uses
+`cuda:0` (the first visible GPU).
 
 ### `--quick`
 

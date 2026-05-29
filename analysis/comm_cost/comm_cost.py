@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""Communication-cost benchmark: GPU SMPC wall-clock (+ analytical bytes in CSV).
+"""Communication-cost benchmark: GPU wall-clock for plain and SMPC (+ bytes in CSV).
 
-Default FT sweep: |θ| from ``models/init/hp5.pth`` (when present) plus 1M and 10M.
-Default KNN sweep: n_q in {500,2000}, n_r in {1000,5000,10000}, C in {2,5},
-k in {5,10}. See analysis/comm_cost/README.md.
+Plaintext and SMPC timings both run on GPU (plain on ``cuda:0``, SMPC on
+``cuda:0..P-1``). Default FT sweep: |θ| from ``models/init/hp5.pth`` (when
+present) plus 1M and 10M. Default KNN sweep: n_q in {500,2000},
+n_r in {1000,5000,10000}, C in {2,5}, k in {5,10}. See analysis/comm_cost/README.md.
 """
 
 import argparse
@@ -32,6 +33,7 @@ FLOAT32_BYTES = 4
 INT64_BYTES = 8
 SHA256_HEX_BYTES = 64
 SMPC_DEVICE = "cuda"
+PLAIN_BENCH_DEVICE = "cuda:0"
 
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
 COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV = "COMM_COST_SMPC_ONE_GPU_PER_PARTY"
@@ -308,6 +310,22 @@ def binning_bytes(
     )
 
 
+def _plain_bench_device() -> "torch.device":
+    import torch
+
+    device = torch.device(PLAIN_BENCH_DEVICE)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    return device
+
+
+def _gpu_sync(device: "torch.device") -> None:
+    import torch
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def _median_seconds(fn, n_reps: int) -> float:
     fn()  # warm-up
     samples: List[float] = []
@@ -563,7 +581,7 @@ def benchmark_fine_tuning(
     from cliftiGPT.federated.aggregator import FedAvg
 
     _ = torch
-    plain_device = torch.device("cpu")
+    plain_device = _plain_bench_device()
 
     rows: List[Dict[str, Any]] = []
 
@@ -585,17 +603,18 @@ def benchmark_fine_tuning(
             agg_plain.global_model_keys = list(state.keys())
             agg_plain.global_weight_shapes = {k: v.shape for k, v in state.items()}
 
-            _log(
-                f"[FT] theta={actual_theta} C={n_clients} P={n_parties}: "
-                f"timing plaintext ({n_reps} reps)..."
-            )
-            t_plain = _median_seconds(
-                lambda: agg_plain.aggregate_plain(local_states, n_samples),
-                n_reps,
-            )
+            def _run_ft_plain() -> None:
+                agg_plain.aggregate_plain(local_states, n_samples)
+                _gpu_sync(plain_device)
 
             _log(
-                f"[FT]   plaintext median={t_plain*1e3:.1f}ms — "
+                f"[FT] theta={actual_theta} C={n_clients} P={n_parties}: "
+                f"timing GPU plaintext on {plain_device} ({n_reps} reps)..."
+            )
+            t_plain = _median_seconds(_run_ft_plain, n_reps)
+
+            _log(
+                f"[FT]   GPU plaintext median={t_plain*1e3:.1f}ms — "
                 f"starting GPU SMPC ({n_parties} parties)..."
             )
             t_smpc = _median_smpc_seconds(
@@ -658,28 +677,26 @@ def benchmark_fine_tuning(
     return rows
 
 
-def _plain_knn(
-    query: np.ndarray, references: List[np.ndarray], k: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    import faiss
+def _plain_knn_gpu(
+    query: "torch.Tensor",
+    references: List["torch.Tensor"],
+    k: int,
+    device: "torch.device",
+) -> "torch.Tensor":
+    """GPU plaintext KNN using the same distance/top-k structure as SMPC."""
+    import torch
 
-    n_q = query.shape[0]
-    all_dists: List[np.ndarray] = []
-    all_inds: List[np.ndarray] = []
-    for ri, ref in enumerate(references):
-        index = faiss.IndexFlatL2(ref.shape[1])
-        index.add(ref.astype(np.float32))
-        D, I = index.search(query.astype(np.float32), k)
-        all_dists.append(D)
-        all_inds.append(I + ri * 10**8)  # cheap unique offset
-    all_dists_arr = np.hstack(all_dists)
-    all_inds_arr = np.hstack(all_inds)
-    sorted_indices = np.argsort(all_dists_arr, axis=1)[:, :k]
-    rows = np.arange(n_q)[:, None]
-    return (
-        all_dists_arr[rows, sorted_indices],
-        all_inds_arr[rows, sorted_indices],
-    )
+    client_topks: List[torch.Tensor] = []
+    for ref in references:
+        query_norm = query.square().sum(dim=1, keepdim=True)
+        ref_norm = ref.square().sum(dim=1).unsqueeze(0)
+        cross = query @ ref.transpose(0, 1)
+        distances = query_norm + ref_norm - 2 * cross
+        client_topks.append(torch.topk(distances, k, dim=1, largest=False).values)
+    cat = torch.cat(client_topks, dim=1)
+    topk_vals = torch.topk(cat, k, dim=1, largest=False).values
+    _gpu_sync(device)
+    return topk_vals
 
 
 def _smpc_knn(
@@ -749,6 +766,7 @@ def benchmark_reference_mapping(
     writer: Optional[IncrementalResultsWriter] = None,
 ) -> List[Dict[str, Any]]:
     rng = np.random.default_rng(42)
+    plain_device = _plain_bench_device()
 
     rows: List[Dict[str, Any]] = []
 
@@ -767,8 +785,14 @@ def benchmark_reference_mapping(
                         for _ in range(n_clients)
                     ]
 
+                    query_gpu = _tensor_on(query, plain_device)
+                    references_gpu = [
+                        _tensor_on(ref, plain_device) for ref in references_np
+                    ]
                     t_plain = _median_seconds(
-                        lambda: _plain_knn(query, references_np, k),
+                        lambda: _plain_knn_gpu(
+                            query_gpu, references_gpu, k, plain_device
+                        ),
                         n_reps,
                     )
 
@@ -777,7 +801,8 @@ def benchmark_reference_mapping(
                     )
                     _log(
                         f"[KNN] {payload} C={n_clients} P={n_parties}: "
-                        f"plaintext={t_plain*1e3:.1f}ms — starting GPU SMPC..."
+                        f"GPU plaintext on {plain_device}={t_plain*1e3:.1f}ms — "
+                        f"starting GPU SMPC..."
                     )
 
                     t_smpc = _median_smpc_seconds(
@@ -953,6 +978,51 @@ def _time_binning_hist_smpc_worker(
     )
 
 
+def _aggregate_bin_edges_gpu(
+    local_bin_edges_list: List[Tuple[np.ndarray, int]],
+    device: "torch.device",
+) -> np.ndarray:
+    import torch
+
+    from cliftiGPT.preprocessor.aggregation import _finalize_bin_edges
+
+    total_samples = sum(samples for _, samples in local_bin_edges_list)
+    n_bins = len(local_bin_edges_list[0][0])
+    weighted = torch.zeros(n_bins, device=device, dtype=torch.float32)
+    for bin_edges, num_samples in local_bin_edges_list:
+        weighted += _tensor_on(bin_edges, device) * float(num_samples)
+    weighted /= float(total_samples)
+    result = _finalize_bin_edges(weighted.detach().cpu().numpy())
+    _gpu_sync(device)
+    return result
+
+
+def _aggregate_histogram_bin_edges_gpu(
+    client_histograms: List[np.ndarray],
+    client_n_list: List[int],
+    value_grid: np.ndarray,
+    n_bins: int,
+    device: "torch.device",
+) -> np.ndarray:
+    import torch
+
+    from cliftiGPT.preprocessor.aggregation import _quantile_cuts_plain
+
+    value_grid = np.asarray(value_grid, dtype=np.float32)
+    m_bins = value_grid.size - 1
+    hist = torch.zeros(m_bins, device=device, dtype=torch.float64)
+    for client_hist in client_histograms:
+        hist += _tensor_on(client_hist, device, dtype=torch.float64)
+    total_n = float(sum(client_n_list))
+    grid_upper_edges = value_grid[1:]
+    probs = np.linspace(0.0, 1.0, n_bins - 1)
+    result = _quantile_cuts_plain(
+        hist.detach().cpu().numpy(), total_n, grid_upper_edges, probs
+    )
+    _gpu_sync(device)
+    return result
+
+
 def benchmark_binning(
     n_clients_values: List[int],
     n_parties: int,
@@ -962,13 +1032,10 @@ def benchmark_binning(
     n_reps: int,
     writer: Optional[IncrementalResultsWriter] = None,
 ) -> List[Dict[str, Any]]:
-    from cliftiGPT.preprocessor.aggregation import (
-        aggregate_bin_edges,
-        aggregate_global_max_expr,
-        aggregate_histogram_bin_edges_plain,
-    )
+    from cliftiGPT.preprocessor.aggregation import aggregate_global_max_expr
 
     rng = np.random.default_rng(42)
+    plain_device = _plain_bench_device()
 
     rows: List[Dict[str, Any]] = []
 
@@ -986,13 +1053,14 @@ def benchmark_binning(
         ]
 
         t_weighted_plain = _median_seconds(
-            lambda: aggregate_bin_edges(local_edges_pairs),
+            lambda: _aggregate_bin_edges_gpu(local_edges_pairs, plain_device),
             n_reps,
         )
 
         _log(
-            f"[BIN] C={n_clients} P={n_parties}: weighted plaintext "
-            f"={t_weighted_plain*1e3:.1f}ms — starting weighted SMPC..."
+            f"[BIN] C={n_clients} P={n_parties}: weighted GPU plaintext "
+            f"on {plain_device}={t_weighted_plain*1e3:.1f}ms — "
+            f"starting weighted SMPC..."
         )
         t_weighted_smpc = _median_smpc_seconds(
             n_parties,
@@ -1014,15 +1082,19 @@ def benchmark_binning(
             for nz in per_client_nonzero
         ]
         t_hist_plain = _median_seconds(
-            lambda: aggregate_histogram_bin_edges_plain(
-                client_histograms, client_n_list, value_grid, n_bins
+            lambda: _aggregate_histogram_bin_edges_gpu(
+                client_histograms,
+                client_n_list,
+                value_grid,
+                n_bins,
+                plain_device,
             ),
             n_reps,
         )
 
         _log(
-            f"[BIN] C={n_clients} P={n_parties}: hist plaintext "
-            f"={t_hist_plain*1e3:.1f}ms — starting hist SMPC..."
+            f"[BIN] C={n_clients} P={n_parties}: hist GPU plaintext "
+            f"on {plain_device}={t_hist_plain*1e3:.1f}ms — starting hist SMPC..."
         )
         t_hist_smpc = _median_smpc_seconds(
             n_parties,
@@ -1323,7 +1395,8 @@ def main() -> None:
     metadata = {
         "args": vars(args),
         "n_parties": args.n_parties,
-        "device": SMPC_DEVICE,
+        "plain_device": PLAIN_BENCH_DEVICE,
+        "smpc_device": SMPC_DEVICE,
         "smpc_one_gpu_per_party": args.smpc_one_gpu_per_party,
         "smpc_cuda_visible_devices": smpc_cuda,
         "rows_written": results_writer.row_count,
