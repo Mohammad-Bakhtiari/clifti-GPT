@@ -23,6 +23,8 @@ Two independent counts:
   `--smpc-one-gpu-per-party` is on).
 - KNN plaintext uses the same GPU distance / top-\(k\) structure as the SMPC path
   (not CPU FAISS).
+- Fine-tuning SMPC applies sample ratios client-side before encryption, matching
+  `Client.get_local_updates` and the weighted plaintext FedAvg path.
 - Overhead ratios \(t_{\mathrm{SMPC}} / t_{\mathrm{plain}}\) therefore reflect
   cryptographic cost on comparable hardware, not CPU vs GPU.
 - Timings exclude real inter-site network latency.

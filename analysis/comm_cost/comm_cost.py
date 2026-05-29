@@ -536,32 +536,47 @@ def _total_params(state: Dict[str, "torch.Tensor"]) -> int:
     return int(sum(t.numel() for t in state.values()))
 
 
+def _ft_n_samples(n_clients: int, n_samples_per_client: int = 1000) -> List[int]:
+    return [n_samples_per_client for _ in range(n_clients)]
+
+
+def _encrypted_weighted_ft_clients(
+    state: Dict[str, "torch.Tensor"],
+    n_samples: List[int],
+) -> List[List]:
+    import crypten
+
+    total = float(sum(n_samples))
+    encrypted_clients: List[List] = []
+    for n in n_samples:
+        ratio = float(n) / total
+        scaled = [param * ratio for param in state.values()]
+        encrypted_clients.append([crypten.cryptensor(param) for param in scaled])
+    return encrypted_clients
+
+
 def _time_ft_smpc_worker(
     theta: int,
     n_clients: int,
     n_parties: int,
     n_reps: int,
     seed: int,
+    n_samples: List[int],
 ) -> float:
-    import crypten
-
     from cliftiGPT.federated.aggregator import FedAvg
 
     device = _init_smpc_worker(seed, n_parties)
 
     state = _make_state_dict(theta, device)
     agg_smpc = FedAvg(
-        weighted=False,
+        weighted=True,
         n_rounds=1,
         smpc=True,
         debug=False,
     )
     agg_smpc.global_model_keys = list(state.keys())
     agg_smpc.global_weight_shapes = {k: v.shape for k, v in state.items()}
-    encrypted_clients = [
-        [crypten.cryptensor(v) for v in state.values()]
-        for _ in range(n_clients)
-    ]
+    encrypted_clients = _encrypted_weighted_ft_clients(state, n_samples)
     return _median_seconds(
         lambda: agg_smpc.aggregate_smpc(encrypted_clients),
         n_reps,
@@ -592,7 +607,7 @@ def benchmark_fine_tuning(
             local_states = [
                 {k: v.clone() for k, v in state.items()} for _ in range(n_clients)
             ]
-            n_samples = [1000 for _ in range(n_clients)]
+            n_samples = _ft_n_samples(n_clients)
 
             agg_plain = FedAvg(
                 weighted=True,
@@ -625,6 +640,7 @@ def benchmark_fine_tuning(
                 n_parties,
                 n_reps,
                 42,
+                n_samples,
             )
 
             cost_plain = ft_weight_sharing_bytes(
