@@ -266,6 +266,7 @@ def _write_workflow_table(
             n_clients = int(row["n_clients"])
             time_str = _fmt_time(float(row["t_seconds"]))
             overhead = float(row["crypto_overhead"])
+            overhead_str = f"{overhead:.1f}$\\times$"
             config_cell = _config_cell(config, n_rows, row_idx == 0)
             if row_idx == n_rows - 1 and not is_last_group:
                 row_end = _group_rule()
@@ -276,7 +277,7 @@ def _write_workflow_table(
                 f"{_wrap_cell(COL_C, str(n_clients), 'center')} & "
                 f"{config_cell} & "
                 f"{_wrap_cell(COL_TIME, time_str, 'right')} & "
-                f"{_wrap_cell(COL_OVERHEAD, f'{overhead:.1f}$\\times$', 'right')}"
+                f"{_wrap_cell(COL_OVERHEAD, overhead_str, 'right')}"
                 f"{row_end}"
             )
 

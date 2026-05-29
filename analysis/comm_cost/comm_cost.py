@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Communication-cost benchmark: GPU SMPC wall-clock (+ analytical bytes in CSV).
 
+Default FT sweep: |θ| from ``models/init/hp5.pth`` (when present) plus 1M and 10M.
 Default KNN sweep: n_q in {500,2000}, n_r in {1000,5000,10000}, C in {2,5},
 k in {5,10}. See analysis/comm_cost/README.md.
 """
@@ -34,7 +35,10 @@ SMPC_DEVICE = "cuda"
 
 COMM_COST_N_PARTIES_ENV = "COMM_COST_N_PARTIES"
 COMM_COST_SMPC_ONE_GPU_PER_PARTY_ENV = "COMM_COST_SMPC_ONE_GPU_PER_PARTY"
+COMM_COST_INIT_WEIGHTS_ENV = "COMM_COST_INIT_WEIGHTS"
 _DEFAULT_N_PARTIES = 3
+_DEFAULT_INIT_WEIGHTS = _REPO_ROOT / "models/init/hp5.pth"
+_DEFAULT_FT_THETAS_SYNTHETIC = (1_000_000, 10_000_000)
 
 RESULT_CSV_FIELDNAMES = [
     "workflow",
@@ -1113,8 +1117,12 @@ def parse_args():
         ),
     )
     p.add_argument(
-        "--ft_thetas", type=str, default="1_000_000,10_000_000",
-        help="Comma-separated parameter counts for fine-tuning benchmark.",
+        "--ft_thetas", type=str, default=None,
+        help=(
+            "Comma-separated parameter counts for fine-tuning. "
+            "If omitted, uses |θ| from models/init/hp5.pth when present, "
+            "plus 1M and 10M synthetic sizes."
+        ),
     )
     p.add_argument(
         "--ft_clients", type=str, default="2,3,5",
@@ -1192,11 +1200,44 @@ def _parse_thetas(s: str) -> List[int]:
     return [int(x.replace("_", "")) for x in s.split(",") if x.strip()]
 
 
+def _theta_from_checkpoint(path: Path) -> int:
+    import torch
+
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    return int(sum(t.numel() for t in state.values()))
+
+
+def resolve_ft_theta_values(cli_thetas: Optional[str]) -> List[int]:
+    """Default FT sweep: checkpoint |θ| (if found) plus 1M and 10M."""
+    if cli_thetas is not None:
+        return _parse_thetas(cli_thetas)
+
+    values: List[int] = []
+    weights_path = Path(os.environ.get(COMM_COST_INIT_WEIGHTS_ENV, _DEFAULT_INIT_WEIGHTS))
+    if not weights_path.is_absolute():
+        weights_path = REPO_ROOT / weights_path
+    if weights_path.is_file():
+        theta = _theta_from_checkpoint(weights_path)
+        values.append(theta)
+        _log(f"FT sweep includes |θ|={theta:,} from {weights_path}")
+    else:
+        _log(
+            f"FT sweep: init weights not found at {weights_path}; "
+            f"using synthetic |θ| only ({', '.join(str(t) for t in _DEFAULT_FT_THETAS_SYNTHETIC)})"
+        )
+    for theta in _DEFAULT_FT_THETAS_SYNTHETIC:
+        if theta not in values:
+            values.append(theta)
+    return values
+
+
 def main() -> None:
     args = parse_args()
     if args.quick:
         _apply_quick_preset(args)
     args.n_parties = resolve_n_parties(args.n_parties)
+    ft_theta_values = resolve_ft_theta_values(args.ft_thetas)
+    args.ft_thetas = ",".join(str(theta) for theta in ft_theta_values)
     _require_cuda()
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
@@ -1247,7 +1288,7 @@ def main() -> None:
 
     if "fine_tuning" in workflows:
         benchmark_fine_tuning(
-            theta_values=_parse_thetas(args.ft_thetas),
+            theta_values=ft_theta_values,
             n_clients_values=_parse_int_list(args.ft_clients),
             n_parties=args.n_parties,
             n_rounds=args.ft_rounds,
