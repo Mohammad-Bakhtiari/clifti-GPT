@@ -67,10 +67,10 @@ STRATEGY_ALIASES = {
 }
 
 FIGURE_STEMS = {
-    "cramers_v": "S19_cramers_v",
-    "js_amplification": "S19_js_amplification",
-    "accuracy": "S19_accuracy",
-    "legend": "S19_legend",
+    "cramers_v": "binning_benchmark_cramers_v",
+    "js_amplification": "binning_benchmark_js_amplification",
+    "accuracy": "binning_benchmark_accuracy",
+    "legend": "binning_benchmark_legend",
 }
 
 METRIC_PANELS = (
@@ -317,7 +317,7 @@ def _annotate_round(ax: Axes, bar, dataset: str, strategy: str, acc_df: pd.DataF
     ax.text(
         bar.get_x() + bar.get_width() / 2.0,
         bar.get_height(),
-        f"r{round_no}",
+        f"{round_no}",
         ha="center",
         va="bottom",
         fontsize=FONT_SIZE,
