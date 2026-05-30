@@ -93,5 +93,7 @@ python analysis/comm_cost/comm_cost.py --workflows reference_mapping
 ## Outputs
 
 `output/comm_cost/comm_cost_results.csv`, `comm_cost_metadata.json`,
-`comm_cost_*.png`, `communication_cost_table.tex`,
-`communication_cost_table_*.tex`, `communication_cost_macros.tex`
+`comm_cost_*.png`, `communication_cost_table_*.tex`, `communication_cost_macros.tex`
+
+Copy the three `communication_cost_table_*.tex` fragments into your paper and
+`\input` them directly (e.g. from `Figures.tex`).
