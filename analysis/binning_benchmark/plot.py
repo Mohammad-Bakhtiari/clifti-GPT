@@ -27,7 +27,7 @@ from analysis.binning_benchmark.config import (
     WIDE_METRIC_PREFIX,
 )
 
-FONT_SIZE = 10
+FONT_SIZE = 11
 PANEL_DPI = 200
 PANEL_FIGSIZE = (6.5, 3.5)
 BAR_EDGE_COLOR = "0.15"
