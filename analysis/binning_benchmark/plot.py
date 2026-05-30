@@ -27,7 +27,7 @@ from analysis.binning_benchmark.config import (
     WIDE_METRIC_PREFIX,
 )
 
-FONT_SIZE = 11
+FONT_SIZE = 14
 PANEL_DPI = 200
 PANEL_FIGSIZE = (6.5, 3.5)
 BAR_EDGE_COLOR = "0.15"
@@ -229,7 +229,9 @@ def _draw_grouped_bars(
 
     ax.set_xlabel("")
     ax.set_ylabel(ylabel)
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=20, ha="right")
+    ax.tick_params(axis="x", labelrotation=20)
+    for label in ax.get_xticklabels():
+        label.set_horizontalalignment("right")
     if ylim is not None:
         ax.set_ylim(*ylim)
 
