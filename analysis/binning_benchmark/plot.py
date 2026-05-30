@@ -4,7 +4,7 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -13,6 +13,7 @@ if str(_REPO_ROOT) not in sys.path:
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -25,16 +26,21 @@ from analysis.binning_benchmark.config import (
     DATASET_SLUG_TO_DISPLAY,
     WIDE_METRIC_PREFIX,
 )
-from analysis.utils import safe_extended_palette
 
 FONT_SIZE = 10
 PANEL_DPI = 200
 PANEL_FIGSIZE = (6.5, 3.5)
-BAR_WIDTH = 0.11
 BAR_EDGE_COLOR = "0.15"
 BAR_EDGE_WIDTH = 0.6
 ACCURACY_YLIM = (0.0, 1.5)
 SMPC_HATCH = "///"
+
+# Same colorblind-friendly palette as analysis/utils.py (inlined to avoid that import).
+_STRATEGY_BASE_COLORS = {
+    "centralized": "#949494",
+    "fed-weight-avg": "#0173b2",
+    "fed-hist": "#029e73",
+}
 
 STRATEGY_LABELS = {
     "centralized": "Centralized",
@@ -43,13 +49,8 @@ STRATEGY_LABELS = {
     "fed-hist": "Fed-hist-binning",
     "fed-hist-smpc": "Fed-hist-binning-SMPC",
 }
-STRATEGY_BASE_COLORS = {
-    "centralized": safe_extended_palette[7],
-    "fed-weight-avg": safe_extended_palette[0],
-    "fed-hist": safe_extended_palette[2],
-}
 STRATEGY_COLORS = {
-    strategy: STRATEGY_BASE_COLORS[strategy.replace("-smpc", "")]
+    strategy: _STRATEGY_BASE_COLORS[strategy.replace("-smpc", "")]
     for strategy in BINNING_STRATEGIES
 }
 STRATEGY_HATCHES = {
@@ -77,10 +78,11 @@ METRIC_PANELS = (
     ("js_amplification", "JS_binned / JS_raw", 1.0),
 )
 
-_EMPTY_ACC_COLUMNS = ["dataset", "prep_mode", "best_accuracy", "best_round"]
+_EMPTY_ACC_COLUMNS = ["dataset", "strategy", "best_accuracy", "best_round"]
 
 
 def _apply_plot_style() -> None:
+    sns.set_theme(style="whitegrid")
     plt.rcParams.update(
         {
             "font.size": FONT_SIZE,
@@ -91,16 +93,6 @@ def _apply_plot_style() -> None:
             "legend.fontsize": FONT_SIZE,
         }
     )
-
-
-def _strategy_bar_kwargs(strategy: str) -> dict:
-    return {
-        "color": STRATEGY_COLORS[strategy],
-        "hatch": STRATEGY_HATCHES[strategy],
-        "edgecolor": BAR_EDGE_COLOR,
-        "linewidth": BAR_EDGE_WIDTH,
-        "zorder": 3 if strategy.endswith("-smpc") else 2,
-    }
 
 
 def _normalize_strategy_names(series: pd.Series) -> pd.Series:
@@ -176,34 +168,27 @@ def _ordered_datasets(primary: pd.DataFrame, secondary: pd.DataFrame) -> List[st
     return primary_names + extra
 
 
-def _set_grouped_bar_xlim(ax: Axes, n_datasets: int) -> None:
-    n_strategies = len(BINNING_STRATEGIES)
-    half_span = (n_strategies - 1) / 2.0 * BAR_WIDTH + BAR_WIDTH / 2.0
-    ax.set_xlim(-0.5 - half_span - 0.08, n_datasets - 0.5 + half_span + 0.08)
-
-
-def _finalize_bar_axis(
-    ax: Axes,
+def _prepare_barplot_df(
+    table: pd.DataFrame,
     datasets: List[str],
-    ylabel: str,
-    ylim: Optional[tuple] = None,
-) -> None:
-    ax.set_xticks(np.arange(len(datasets)))
-    ax.set_xticklabels(datasets, rotation=20, ha="right")
-    ax.set_ylabel(ylabel)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-    _set_grouped_bar_xlim(ax, len(datasets))
-    ax.grid(axis="y", alpha=0.3)
+    value_col: str,
+) -> pd.DataFrame:
+    plot_df = table.rename(columns={value_col: "value"}).copy()
+    plot_df["dataset"] = pd.Categorical(
+        plot_df["dataset"], categories=datasets, ordered=True
+    )
+    plot_df["strategy"] = pd.Categorical(
+        plot_df["strategy"], categories=list(BINNING_STRATEGIES), ordered=True
+    )
+    return plot_df.sort_values(["dataset", "strategy"])
 
 
-def _lookup_value(table: pd.DataFrame, dataset: str, strategy: str, column: str):
-    row = table[
-        (table["dataset"] == dataset) & (table["strategy"] == strategy)
-    ]
-    if row.empty:
-        return np.nan
-    return float(row[column].iloc[0])
+def _style_strategy_bars(ax: Axes, n_datasets: int) -> None:
+    for i, bar in enumerate(ax.patches):
+        strategy = BINNING_STRATEGIES[i // n_datasets]
+        bar.set_hatch(STRATEGY_HATCHES[strategy])
+        bar.set_edgecolor(BAR_EDGE_COLOR)
+        bar.set_linewidth(BAR_EDGE_WIDTH)
 
 
 def _draw_grouped_bars(
@@ -216,19 +201,38 @@ def _draw_grouped_bars(
     ylim: Optional[tuple] = None,
     annotate: Optional[Callable[[Axes, object, str, str], None]] = None,
 ) -> None:
-    x = np.arange(len(datasets))
-    n_strategies = len(BINNING_STRATEGIES)
-    for i, strategy in enumerate(BINNING_STRATEGIES):
-        vals = [_lookup_value(table, ds, strategy, value_col) for ds in datasets]
-        offset = (i - (n_strategies - 1) / 2.0) * BAR_WIDTH
-        bars = ax.bar(x + offset, vals, BAR_WIDTH, **_strategy_bar_kwargs(strategy))
-        if annotate is not None:
-            for bar, ds in zip(bars, datasets):
-                annotate(ax, bar, ds, strategy)
+    plot_df = _prepare_barplot_df(table, datasets, value_col)
+    sns.barplot(
+        data=plot_df,
+        x="dataset",
+        y="value",
+        hue="strategy",
+        order=datasets,
+        hue_order=list(BINNING_STRATEGIES),
+        palette=STRATEGY_COLORS,
+        ax=ax,
+        width=0.8,
+        dodge=True,
+    )
+    _style_strategy_bars(ax, len(datasets))
+    if ax.legend_ is not None:
+        ax.legend_.remove()
+
+    if annotate is not None:
+        n_datasets = len(datasets)
+        for i, bar in enumerate(ax.patches):
+            strategy = BINNING_STRATEGIES[i // n_datasets]
+            dataset = datasets[i % n_datasets]
+            annotate(ax, bar, dataset, strategy)
 
     if reference_line is not None:
         ax.axhline(reference_line, color="black", linewidth=0.8, linestyle="--")
-    _finalize_bar_axis(ax, datasets, ylabel, ylim=ylim)
+
+    ax.set_xlabel("")
+    ax.set_ylabel(ylabel)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=20, ha="right")
+    if ylim is not None:
+        ax.set_ylim(*ylim)
 
 
 def parse_args():
