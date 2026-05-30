@@ -183,12 +183,13 @@ def _prepare_barplot_df(
     return plot_df.sort_values(["dataset", "strategy"])
 
 
-def _style_strategy_bars(ax: Axes, n_datasets: int) -> None:
-    for i, bar in enumerate(ax.patches):
-        strategy = BINNING_STRATEGIES[i // n_datasets]
-        bar.set_hatch(STRATEGY_HATCHES[strategy])
-        bar.set_edgecolor(BAR_EDGE_COLOR)
-        bar.set_linewidth(BAR_EDGE_WIDTH)
+def _style_strategy_bars(ax: Axes) -> None:
+    for strategy, container in zip(BINNING_STRATEGIES, ax.containers):
+        hatch = STRATEGY_HATCHES[strategy]
+        for bar in container:
+            bar.set_hatch(hatch)
+            bar.set_edgecolor(BAR_EDGE_COLOR)
+            bar.set_linewidth(BAR_EDGE_WIDTH)
 
 
 def _draw_grouped_bars(
@@ -214,16 +215,14 @@ def _draw_grouped_bars(
         width=0.8,
         dodge=True,
     )
-    _style_strategy_bars(ax, len(datasets))
+    _style_strategy_bars(ax)
     if ax.legend_ is not None:
         ax.legend_.remove()
 
     if annotate is not None:
-        n_datasets = len(datasets)
-        for i, bar in enumerate(ax.patches):
-            strategy = BINNING_STRATEGIES[i // n_datasets]
-            dataset = datasets[i % n_datasets]
-            annotate(ax, bar, dataset, strategy)
+        for strategy, container in zip(BINNING_STRATEGIES, ax.containers):
+            for bar, dataset in zip(container, datasets):
+                annotate(ax, bar, dataset, strategy)
 
     if reference_line is not None:
         ax.axhline(reference_line, color="black", linewidth=0.8, linestyle="--")
