@@ -28,6 +28,7 @@ from analysis.binning_benchmark.config import (
 )
 
 FONT_SIZE = 14
+ACCURACY_ANNOTATION_HP5_FONT_SIZE = FONT_SIZE - 2
 PANEL_DPI = 200
 PANEL_FIGSIZE = (6.5, 3.5)
 BAR_EDGE_COLOR = "0.15"
@@ -316,13 +317,16 @@ def _annotate_round(ax: Axes, bar, dataset: str, strategy: str, acc_df: pd.DataF
     if row.empty or not np.isfinite(bar.get_height()):
         return
     round_no = int(row["best_round"].iloc[0])
+    label_fontsize = (
+        ACCURACY_ANNOTATION_HP5_FONT_SIZE if dataset == "HP5" else FONT_SIZE
+    )
     ax.text(
         bar.get_x() + bar.get_width() / 2.0,
         bar.get_height(),
         f"{round_no}",
         ha="center",
         va="bottom",
-        fontsize=FONT_SIZE,
+        fontsize=label_fontsize,
     )
 
 
