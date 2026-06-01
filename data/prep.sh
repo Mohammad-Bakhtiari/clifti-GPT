@@ -27,7 +27,6 @@ if [[ "$correction" == "true" ]]; then
     declare -A datasets
     # Order: dataset_subdir|uncorrected_subdir|corrected_adata|reference_filename|query_filename|celltype_key
     datasets["COVID-cent"]="covid-corrected|covid|Covid_annot-uncorrected.h5ad|corrected.h5ad|reference.h5ad|query.h5ad|celltype"
-    datasets["COVID-fed"]="covid-fed-corrected|covid|Covid_annot-uncorrected.h5ad|fed_corrected.h5ad|reference.h5ad|query.h5ad|celltype"
 
     for key in "${!datasets[@]}"; do
       echo -e "\e[32mPreprocessing data after batch effect correction for ${key}\e[0m"
