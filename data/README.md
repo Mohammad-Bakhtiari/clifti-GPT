@@ -24,7 +24,7 @@ python data/myeloid_prep.py
 
 ### COVID corrected (required for `COVID-corrected`)
 
-Uncorrected `covid/` is included; the centrally corrected split is not. **Run** batch correction before `COVID-corrected` experiments. This needs upstream `Covid.h5ad` under `covid/` (not in the Zenodo bundle) and [fedscGen](https://github.com/HelmholtzAI/fedscGen):
+Uncorrected `covid/` is included (`reference-raw.h5ad`, `query-raw.h5ad`, and upstream `Covid.h5ad` for batch correction); the centrally corrected split is not. **Run** batch correction before `COVID-corrected` experiments using the optional `batch_correction` conda environment:
 
 ```bash
 bash data/correct_batch_effect.sh data/scgpt/benchmark

@@ -41,6 +41,53 @@ To handle scGPT's tokenization pipeline—which converts continuous gene express
 | [`analysis/`](analysis/) | Post-training analysis, figures, communication-cost and binning benchmarks |
 | [`data/`](data/) | Benchmark data layout and download instructions ([`data/README.md`](data/README.md)) |
 | [`models/`](models/) | Pretrained scGPT checkpoints and per-dataset init weights (not shipped in git) |
+| [`environment/`](environment/) | Conda environment specs ([`environment/README.md`](environment/README.md)) |
+
+## Installation
+
+Tested on **Linux** with NVIDIA GPUs. Create conda environments from the specs in [`environment/`](environment/):
+
+```bash
+conda env create -f environment/annotation.yml
+conda env create -f environment/embedding.yml
+conda env create -f environment/batch_correction.yml   # optional: COVID batch correction only
+```
+
+### Main experiments (`annotation` + `embedding`)
+
+These two environments share the same GPU/CUDA stack.
+
+**Tested software (embedding env on cluster):**
+
+| Component | Version |
+|-----------|---------|
+| Python | 3.9 |
+| PyTorch | 2.1.0+cu121 |
+| PyTorch CUDA toolkit | 12.1 |
+| CrypTen | 0.4.1 |
+| flash-attn | 1.0.4 (`annotation` only) |
+
+**Tested hardware:**
+
+| | |
+|--|--|
+| GPU | 4× NVIDIA Tesla T4 (15 GB) |
+| NVIDIA driver | 560.35.05 |
+
+See [`environment/annotation.yml`](environment/annotation.yml) and [`environment/embedding.yml`](environment/embedding.yml) for the full pinned dependency lists. Wheel tags in those files may differ slightly (e.g. `+cu118`) from the runtime above; use the yml specs when recreating the environments.
+
+### Batch effect correction (`batch_correction`, optional)
+
+Separate environment for generating `covid-corrected/` data (`data/correct_batch_effect.sh`). Not required for the main experiment pipeline.
+
+| Component | Version |
+|-----------|---------|
+| Python | 3.10 |
+| PyTorch | 2.7.0 |
+
+After `conda activate batch_correction`, the correction script calls the installed batch-correction CLI entry points.
+
+See [`data/README.md`](data/README.md) for when this step is needed.
 
 ## Data
 
