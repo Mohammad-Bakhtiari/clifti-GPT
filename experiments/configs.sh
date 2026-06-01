@@ -7,7 +7,6 @@ datasets["LUNG"]="lung|reference_annot.h5ad|query_annot.h5ad|cell_type|sample|ge
 datasets["CellLine"]="cl|reference.h5ad|query.h5ad|cell_type|batch|index"
 datasets["COVID"]="covid|reference-raw.h5ad|query-raw.h5ad|celltype|batch_group|gene_name"
 datasets["COVID-corrected"]="covid-corrected|reference_corrected.h5ad|query_corrected.h5ad|celltype|batch_group|gene_name"
-datasets["COVID-fed-corrected"]="covid-fed-corrected|reference_fed_corrected.h5ad|query_fed_corrected.h5ad|celltype|batch_group|gene_name"
 
 
 # Scalability experiments
