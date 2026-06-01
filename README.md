@@ -8,6 +8,11 @@ Clifti-GPT is a secure, privacy-preserving federated learning framework built sp
 
 By leveraging Secure Multi-Party Computation (SMPC) and additive secret sharing, Clifti-GPT allows multiple medical institutions to collaboratively leverage powerful transformer models without ever centralizing patient-level raw count matrices, moving data embeddings, or exposing institutional models and local statistics.
 
+<p align="center">
+  <img src="docs/figures/clifti-gpt-architecture.png" alt="Clifti-GPT federated architecture: clients perform secret-sharing locally; computational parties process shares; the coordinator runs secure aggregation and deploys models back to clients." width="900">
+</p>
+<p align="center"><em>Overview of the Clifti-GPT workflow: secret-sharing at client sites, secure computation on shares, and coordinator-driven secure aggregation and deployment.</em></p>
+
 ## 🛠️ Framework architecture and key technical modules
 
 Clifti-GPT adapts the scGPT foundation model architecture to a distributed, cryptographically secure environment. The core framework consists of two main pillars designed to protect data and process privacy under strict data protection policies (such as GDPR):
