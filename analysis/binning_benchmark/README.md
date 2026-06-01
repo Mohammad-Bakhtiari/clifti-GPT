@@ -2,7 +2,7 @@
 
 Reproducing the binning benchmark requires **two separate steps in two different places**:
 
-1. **`experiments/`** — train CliftiGPT under each binning strategy and record annotation accuracy.
+1. **`experiments/`** — train Clifti-GPT under each binning strategy and record annotation accuracy.
 2. **`analysis/binning_benchmark/`** (this folder) — compute binning comparison metrics on the benchmark h5ad files and generate the figures.
 
 Neither step replaces the other. Training produces downstream accuracy; the scripts here produce binning metrics and combine both into the final plots.
@@ -24,7 +24,7 @@ cd experiments
 ./run_prep_mode_comparison.sh fed-hist-smpc
 ```
 
-Each command fine-tunes CliftiGPT on all five benchmark datasets with that binning strategy: federated binning during preprocessing, then federated annotation fine-tuning. Dataset-specific hyperparameters (epochs, rounds, aggregation) are fixed inside the script.
+Each command fine-tunes Clifti-GPT on all five benchmark datasets with that binning strategy: federated binning during preprocessing, then federated annotation fine-tuning. Dataset-specific hyperparameters (epochs, rounds, aggregation) are fixed inside the script.
 
 **Output:** `output/annotation/results_summary.csv` — per-run metrics including cell-type Accuracy, keyed by dataset and `prep_mode`.
 
