@@ -1,6 +1,13 @@
+# Ignore all data assets by default; allow prep scripts and docs only.
 *
 !.gitignore
 !*.py
 !*.sh
 !README.md
-!**/README.md
+
+# Benchmark layout doc (h5ad files themselves stay untracked)
+!scgpt/
+scgpt/*
+!scgpt/benchmark/
+scgpt/benchmark/*
+!scgpt/benchmark/README.md
