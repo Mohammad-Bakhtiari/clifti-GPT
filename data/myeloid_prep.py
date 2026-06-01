@@ -1,4 +1,5 @@
-import os
+from pathlib import Path
+
 import anndata
 import pandas as pd
 from prep_batch_effect_correction import calc_umap
@@ -12,10 +13,10 @@ def assign_topN_clients(ref_adata, N, batch_map, rest=False):
 
 
 if __name__ == '__main__':
-    root_dir = 'cliftiGPT/data/scgpt/benchmark'
+    root_dir = Path(__file__).resolve().parent / "scgpt" / "benchmark"
     celltype_key = 'cell_type'
-    ref = anndata.read_h5ad(f"{root_dir}/myeloid/reference_adata.h5ad")
-    query = anndata.read_h5ad(f"{root_dir}/myeloid/query_adata.h5ad")
+    ref = anndata.read_h5ad(root_dir / "myeloid" / "reference_adata.h5ad")
+    query = anndata.read_h5ad(root_dir / "myeloid" / "query_adata.h5ad")
 
     # Combine ref and query temporarily to compute global top 30 batches
     adata = ref.concatenate(query, batch_key=None)
@@ -39,8 +40,9 @@ if __name__ == '__main__':
 
     for n in [5, 10, 20, 30]:
         assigned_ref = assign_topN_clients(reference, n, batch_map, rest=n!=30)
-        out_dir = f"{root_dir}/myeloid-top{n}"
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = root_dir / f"myeloid-top{n}"
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-        assigned_ref.write_h5ad(f"{out_dir}/reference.h5ad")
-        query.write_h5ad(f"{out_dir}/query.h5ad")
+        assigned_ref.write_h5ad(out_dir / "reference.h5ad")
+        query.write_h5ad(out_dir / "query.h5ad")
+        print(f"Wrote myeloid-top{n}: {out_dir / 'reference.h5ad'}, {out_dir / 'query.h5ad'}")
