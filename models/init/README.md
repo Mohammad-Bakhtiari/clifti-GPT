@@ -32,7 +32,8 @@ Filenames must match the table below — experiment scripts resolve paths as `mo
 These init files are **derived from** the scGPT whole-human checkpoint. Download the upstream model from the official repository:
 
 - **Code & checkpoint links:** [bowang-lab/scGPT](https://github.com/bowang-lab/scGPT)
-- **Publication:** Cui, H. et al. scGPT: toward building a foundation model for single-cell multi-omics using generative AI. *Nature Methods* **21**, 1470–1480 (2024). [https://www.nature.com/articles/s41592-024-02201-0](https://www.nature.com/articles/s41592-024-02201-0)
+- **License:** [MIT](https://github.com/bowang-lab/scGPT/blob/main/LICENSE) — third-party; init `.pth` files on Zenodo are derived from scGPT pretrained weights
+- **Publication:** Cui, H. et al. scGPT: toward building a foundation model for single-cell multi-omics using generative AI. *Nature Methods* **21**, 1470–1480 (2024). [https://doi.org/10.1038/s41592-024-02201-0](https://www.nature.com/articles/s41592-024-02201-0)
 
 Place the scGPT files in:
 
@@ -65,3 +66,5 @@ If an init weight is missing locally, Clifti-GPT can create it on first run by l
 Scripts pass `--init_weights_dir models/init/<slug>.pth` via `experiments/annotation.sh` and `experiments/embedding.sh`. The slug matches the benchmark folder name under `data/scgpt/benchmark/` (e.g. `ms`, `hp5`, `lung`).
 
 See [`experiments/README.md`](../../experiments/README.md) for how to run training after both benchmark data and weights are in place.
+
+Clifti-GPT code: Apache 2.0 ([`LICENSE`](../../LICENSE), [`NOTICE`](../../NOTICE)). scGPT: MIT ([upstream license](https://github.com/bowang-lab/scGPT/blob/main/LICENSE)).

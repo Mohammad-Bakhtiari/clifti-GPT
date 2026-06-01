@@ -1,0 +1,30 @@
+Clifti-GPT
+Copyright 2026 Mohammad Bakhtiari
+
+This product includes software developed as part of the Clifti-GPT project.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party components
+================================================================================
+
+scGPT
+-----
+Homepage: https://github.com/bowang-lab/scGPT
+License: MIT License (Copyright (c) 2022 suber)
+
+Clifti-GPT imports the scGPT Python package at runtime and adapts the scGPT
+transformer architecture for federated single-cell analysis. Pretrained scGPT
+checkpoints (e.g. whole-human `best_model.pt`, `vocab.json`, `args.json`) are
+third-party assets: they are not shipped in this repository and must be
+downloaded separately from the scGPT project under its license.
+
+When using Clifti-GPT, also cite:
+  Cui, H. et al. scGPT: toward building a foundation model for single-cell
+  multi-omics using generative AI. Nature Methods 21, 1470–1480 (2024).
+  https://doi.org/10.1038/s41592-024-02201-0
+
+Per-dataset init weights published on Zenodo (10.5281/zenodo.20489646) are
+state_dict snapshots taken after loading scGPT pretrained weights and before
+Clifti-GPT fine-tuning. Redistribution of those files should retain scGPT
+attribution and comply with the scGPT license.

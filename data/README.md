@@ -6,7 +6,7 @@ Clifti-GPT experiments require three types of files that are **not** shipped in 
 |-------|----------|---------------|
 | Benchmark AnnData (reference + query h5ad) | `data/scgpt/benchmark/` | [10.5281/zenodo.20491148](https://doi.org/10.5281/zenodo.20491148) · [`scgpt/benchmark/README.md`](scgpt/benchmark/README.md) |
 | Per-dataset init weights | `models/init/` | [10.5281/zenodo.20489646](https://doi.org/10.5281/zenodo.20489646) · [`../models/init/README.md`](../models/init/README.md) |
-| scGPT whole-human checkpoint | `models/pretrained_models/scGPT_human/` | [scGPT GitHub](https://github.com/bowang-lab/scGPT) · [Nature Methods (2024)](https://www.nature.com/articles/s41592-024-02201-0) |
+| scGPT whole-human checkpoint | `models/pretrained_models/scGPT_human/` | [scGPT GitHub (MIT)](https://github.com/bowang-lab/scGPT) · [Nature Methods (2024)](https://www.nature.com/articles/s41592-024-02201-0) |
 
 Download benchmark h5ad from [10.5281/zenodo.20491148](https://doi.org/10.5281/zenodo.20491148) and init weights from [10.5281/zenodo.20489646](https://doi.org/10.5281/zenodo.20489646), then extract into the paths above.
 
@@ -44,3 +44,8 @@ Use these only if you rebuild benchmarks from upstream public cohorts instead of
 | `correct_batch_effect.sh` | COVID central batch correction |
 | `prep_batch_effect_correction.py` | COVID corrected split helper (used by `correct_batch_effect.sh`) |
 
+Dataset registry for experiments: [`experiments/configs.sh`](../experiments/configs.sh).
+
+## Licensing
+
+Benchmark AnnData and init weights are distributed on Zenodo (see links above). The scGPT foundation checkpoint is a **separate third-party download** under the [scGPT MIT license](https://github.com/bowang-lab/scGPT/blob/main/LICENSE). Clifti-GPT source code is Apache 2.0 — see [`../LICENSE`](../LICENSE) and [`../NOTICE`](../NOTICE).
